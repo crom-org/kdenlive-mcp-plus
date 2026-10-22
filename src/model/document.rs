@@ -79,6 +79,12 @@ pub fn new_document(profile_name: &str) -> Result<Element, ModelError> {
 
     let mut main_bin = Element::new("playlist");
     main_bin.attributes.insert("id".to_string(), MAIN_BIN_ID.to_string());
+    // Confirmado no código-fonte do Kdenlive (DocumentValidator::validate,
+    // DOCUMENTVERSION em kdenlivedoc.cpp, idêntico em master e na v23.08.5):
+    // sem essa propriedade, o Kdenlive real mostra o diálogo de erro
+    // "Arquivo de projeto incorreto" ao abrir (continua mesmo assim, mas o
+    // diálogo é evitável). Ver decisão D-037 em docs/decisoes.md.
+    set_property(&mut main_bin, "kdenlive:docproperties.version", "1.1");
     root.children.push(XMLNode::Element(main_bin));
 
     let mut tractor = Element::new("tractor");

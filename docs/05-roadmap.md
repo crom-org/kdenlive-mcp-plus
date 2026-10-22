@@ -43,13 +43,15 @@ Isso dá 89 ferramentas MCP no total (contando `server_info`, fora dos dois cat�
 
 ## Fase 3 — integração com o Kdenlive aberto
 
-As Fases 0 a 2 estão concluídas e o motor está estável (89 ferramentas, 58 testes passando), satisfazendo a condição que a decisão D-006 colocava para só então começar esta fase. Isso não resolve, porém, as duas coisas que a Fase 3 depende do responsável pelo projeto decidir: a escolha entre fork em C++/Qt e D-Bus (abaixo), e o fato de este ambiente não ter tela para compilar/validar nada de interface gráfica — ver a nota em [docs/09-riscos-e-bugs.md](09-riscos-e-bugs.md).
+As Fases 0 a 2 estão concluídas e o motor está estável (89 ferramentas, 58 testes passando), satisfazendo a condição que a decisão D-006 colocava para só então começar esta fase.
 
-Painéis extras e controle do Kdenlive já aberto pelo usuário, para permitir revisão em tempo real do que o agente está fazendo. Depende de uma escolha entre fazer fork do Kdenlive em C++/Qt ou controlar o Kdenlive por D-Bus (como faz o projeto de referência `mcp-kdenlive`, que usa um fork com patch próprio mais D-Bus — ver [docs/03-concorrentes.md](03-concorrentes.md)).
+Painéis extras e controle do Kdenlive já aberto pelo usuário, para permitir revisão em tempo real do que o agente está fazendo. Depende de uma escolha entre fazer fork do Kdenlive em C++/Qt ou controlar o Kdenlive por D-Bus (como faz o projeto de referência `mcp-kdenlive`, que usa um fork com patch próprio mais D-Bus — ver [docs/03-concorrentes.md](03-concorrentes.md)). Pesquisa nesta execução confirmou, lendo o código-fonte real do Kdenlive, que ele **não expõe nenhuma API D-Bus própria hoje** (só o `KDBusService` padrão de instância única, que nem repassa arquivo para a instância aberta) — as duas opções exigem patch no C++ do Kdenlive, não há atalho. O Kdenlive do `apt` (23.08.5) usa KF5, disponível neste ambiente (441 pacotes), o que torna um fork dessa versão tecnicamente viável aqui.
 
-A decisão D-006 (ver [docs/decisoes.md](decisoes.md)) já definiu que **não há fork do Kdenlive** nas fases anteriores: o motor headless precisa estar estável primeiro, porque o custo de manter um fork é alto.
+A decisão D-006 (ver [docs/decisoes.md](decisoes.md)) já definiu que **não há fork do Kdenlive** nas fases anteriores: o motor headless precisa estar estável primeiro, porque o custo de manter um fork é alto. Essa escolha (fork vs. D-Bus) continua pendente do responsável pelo projeto — nenhuma das duas foi tentada nesta execução.
 
-**Critério de saída:** ainda não definido. Esta fase só começa depois que as Fases 0 a 2 estiverem concluídas e o motor estiver estável em uso real.
+**Achado mais importante desta investigação, e que muda a prioridade da Fase 3:** o teste manual de abertura no Kdenlive real, pendente desde a Fase 0, foi finalmente executado (D-038 em [docs/decisoes.md](decisoes.md)) — este ambiente tem um `DISPLAY` real, não é headless como se supunha antes. O resultado revelou que os projetos gerados por este servidor, embora renderizem perfeitamente via libmlt, **perdem clipes de timeline e efeitos/transições brutos ao serem abertos na GUI do Kdenlive real**, por uma provável diferença estrutural (cada trilha deveria ser seu próprio `<tractor>`, não uma `<playlist>` solta). Isso é uma lacuna mais fundamental do que painéis/D-Bus, e mais barata de corrigir (só Rust, sem tocar C++/Qt) — ver a pendência detalhada em [docs/decisoes.md](decisoes.md). Corrigi-la primeiro, antes de painéis/D-Bus, provavelmente é a ordem certa, já que de nada adianta um painel ao vivo mostrando um projeto que a própria timeline do Kdenlive não consegue representar direito.
+
+**Critério de saída:** ainda não definido. A ordem sugerida por esta investigação: (1) corrigir a compatibilidade estrutural da timeline (acima); (2) só então decidir e implementar fork vs. D-Bus para os painéis ao vivo.
 
 ---
 [Voltar ao índice](README.md)
