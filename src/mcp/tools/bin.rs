@@ -1,12 +1,13 @@
 //! `bin_import_clip`, `bin_list_clips`, `bin_get_clip_details`,
-//! `bin_remove_clip`.
+//! `bin_remove_clip`, `clip_set_color`, `clip_add_note` (ferramentas de
+//! bin, apesar do prefixo `clip_` no nome original — ver docs/04).
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use crate::mcp::ffprobe;
-use crate::mcp::params::{BinClipIdParams, BinImportClipParams};
+use crate::mcp::params::{BinClipColorParams, BinClipIdParams, BinClipNoteParams, BinImportClipParams};
 use crate::mcp::server::{KdenliveMcpServer, erro};
 use crate::model::document;
 
@@ -18,6 +19,8 @@ fn clip_json(doc: &xmltree::Element, id: &str) -> Option<Value> {
         "clip_id": id,
         "nome": document::get_property(producer, "kdenlive:clipname"),
         "resource": recurso,
+        "cor": document::get_property(producer, "kdenlive-mcp-plus:color"),
+        "nota": document::get_property(producer, "kdenlive-mcp-plus:note"),
         "in_frame": producer.attributes.get("in").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
         "out_frame": producer.attributes.get("out").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0),
         "arquivo_existe": existe,
@@ -118,6 +121,38 @@ impl KdenliveMcpServer {
             .await;
         match resultado {
             Ok(()) => json!({ "ok": true, "clip_id": params.clip_id }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn clip_set_color_impl(&self, params: BinClipColorParams) -> Value {
+        let descricao = format!("definir cor do clipe \"{}\"", params.clip_id);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                document::bin_clip_set_color(&mut session.doc, &params.clip_id, &params.color)?;
+                session.mark_modified();
+                Ok(())
+            })
+            .await;
+        match resultado {
+            Ok(()) => json!({ "ok": true, "clip_id": params.clip_id, "cor": params.color }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn clip_add_note_impl(&self, params: BinClipNoteParams) -> Value {
+        let descricao = format!("definir nota do clipe \"{}\"", params.clip_id);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                document::bin_clip_set_note(&mut session.doc, &params.clip_id, &params.note)?;
+                session.mark_modified();
+                Ok(())
+            })
+            .await;
+        match resultado {
+            Ok(()) => json!({ "ok": true, "clip_id": params.clip_id, "nota": params.note }),
             Err(valor_erro) => valor_erro,
         }
     }

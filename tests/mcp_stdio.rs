@@ -87,9 +87,28 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "bin_import_clip",
             "bin_list_clips",
             "bin_remove_clip",
+            "clip_add_note",
+            "clip_get_properties",
+            "clip_reverse",
+            "clip_set_color",
+            "clip_set_opacity",
+            "clip_set_speed",
             "export_list_presets",
             "export_render",
             "export_xml",
+            "filter_add",
+            "filter_list",
+            "filter_list_available",
+            "filter_remove",
+            "filter_set_param",
+            "guide_add",
+            "guide_get",
+            "guide_list",
+            "guide_remove",
+            "guide_update",
+            "marker_add",
+            "marker_list",
+            "marker_remove",
             "preview_frame",
             "project_get_info",
             "project_import_kdenlive",
@@ -100,11 +119,26 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "render_cancel",
             "render_progress",
             "server_info",
+            "session_history",
+            "session_redo",
+            "session_status",
+            "session_undo",
             "timeline_add_clip",
             "timeline_add_track",
             "timeline_get_info",
             "timeline_list",
             "timeline_remove_track",
+            "track_get_info",
+            "track_move_down",
+            "track_move_up",
+            "track_set_hidden",
+            "track_set_locked",
+            "track_set_muted",
+            "track_set_name",
+            "transition_add",
+            "transition_list",
+            "transition_remove",
+            "transition_set",
         ]
     );
 
@@ -480,5 +514,263 @@ async fn render_progress_e_render_cancel_acompanham_um_job_assincrono() {
     assert_eq!(desconhecido["ok"], Value::Bool(false));
 
     let _ = std::fs::remove_file(&saida);
+    client.cancel().await.expect("fechamento limpo do cliente");
+}
+
+/// Exercita as ferramentas de trilha, clipe, sessão (undo/redo), filtros,
+/// transições, guias e marcadores — tudo da Fase 2, grupos 1 a 3.
+#[tokio::test]
+async fn fase2_trilha_clipe_sessao_filtros_transicoes_guias_marcadores() {
+    let client = iniciar_cliente().await;
+
+    chamar(&client, "project_new", serde_json::json!({})).await;
+
+    // --- trilhas -------------------------------------------------------
+    let t0 = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "video" })).await;
+    let track_a = t0["track_id"].as_str().unwrap().to_string();
+    let t1 = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "video" })).await;
+    let track_b = t1["track_id"].as_str().unwrap().to_string();
+
+    let renomeada = chamar(
+        &client,
+        "track_set_name",
+        serde_json::json!({ "track_id": track_a, "name": "Principal" }),
+    )
+    .await;
+    assert_ok(&renomeada, "track_set_name");
+
+    chamar(&client, "track_set_locked", serde_json::json!({ "track_id": track_a, "value": true })).await;
+    chamar(&client, "track_set_hidden", serde_json::json!({ "track_id": track_a, "value": true })).await;
+    chamar(&client, "track_set_muted", serde_json::json!({ "track_id": track_a, "value": true })).await;
+
+    let info_trilha = chamar(&client, "track_get_info", serde_json::json!({ "track_id": track_a })).await;
+    assert_ok(&info_trilha, "track_get_info");
+    assert_eq!(info_trilha["nome"], Value::from("Principal"));
+    assert_eq!(info_trilha["travada"], Value::Bool(true));
+    assert_eq!(info_trilha["oculta"], Value::Bool(true));
+    assert_eq!(info_trilha["muda"], Value::Bool(true));
+
+    let movida = chamar(&client, "track_move_up", serde_json::json!({ "track_id": track_b })).await;
+    assert_ok(&movida, "track_move_up");
+    let erro_borda = chamar(&client, "track_move_up", serde_json::json!({ "track_id": track_b })).await;
+    assert_eq!(erro_borda["ok"], Value::Bool(false), "já deveria estar na primeira posição");
+    chamar(&client, "track_move_down", serde_json::json!({ "track_id": track_b })).await;
+
+    // --- clipe + velocidade/reversão/opacidade --------------------------
+    let midia = caminho_temporario("fase2_midia.mp4");
+    let _ = std::fs::remove_file(&midia);
+    chamar(
+        &client,
+        "export_render",
+        serde_json::json!({
+            "project_path": caminho_fixture().to_string_lossy(),
+            "output_path": midia.to_string_lossy(),
+            "preset": "h264_hq",
+            "overwrite": true,
+        }),
+    )
+    .await;
+    let importado = chamar(
+        &client,
+        "bin_import_clip",
+        serde_json::json!({ "path": midia.to_string_lossy() }),
+    )
+    .await;
+    let clip_id = importado["clip_id"].as_str().unwrap().to_string();
+
+    let cor = chamar(
+        &client,
+        "clip_set_color",
+        serde_json::json!({ "clip_id": clip_id, "color": "#ff0000" }),
+    )
+    .await;
+    assert_ok(&cor, "clip_set_color");
+    let nota = chamar(
+        &client,
+        "clip_add_note",
+        serde_json::json!({ "clip_id": clip_id, "note": "clipe de teste da Fase 2" }),
+    )
+    .await;
+    assert_ok(&nota, "clip_add_note");
+    let detalhes = chamar(&client, "bin_get_clip_details", serde_json::json!({ "clip_id": clip_id })).await;
+    assert_eq!(detalhes["cor"], Value::from("#ff0000"));
+    assert_eq!(detalhes["nota"], Value::from("clipe de teste da Fase 2"));
+
+    let posicionado = chamar(
+        &client,
+        "timeline_add_clip",
+        serde_json::json!({ "track_id": track_a, "producer_id": clip_id, "in_frame": 0, "out_frame": 49, "position": 0 }),
+    )
+    .await;
+    let clip_ref = posicionado["clip_ref"].as_str().unwrap().to_string();
+
+    let propriedades = chamar(&client, "clip_get_properties", serde_json::json!({ "clip_ref": clip_ref })).await;
+    assert_ok(&propriedades, "clip_get_properties");
+    assert_eq!(propriedades["velocidade"], Value::from(1.0));
+
+    let velocidade = chamar(
+        &client,
+        "clip_set_speed",
+        serde_json::json!({ "clip_ref": clip_ref, "speed": 2.0 }),
+    )
+    .await;
+    assert_ok(&velocidade, "clip_set_speed");
+
+    let invertido = chamar(&client, "clip_reverse", serde_json::json!({ "clip_ref": clip_ref })).await;
+    assert_ok(&invertido, "clip_reverse");
+    assert_eq!(invertido["velocidade"], Value::from(-2.0), "deveria inverter a velocidade atual (2.0 -> -2.0)");
+
+    let opacidade = chamar(
+        &client,
+        "clip_set_opacity",
+        serde_json::json!({ "clip_ref": clip_ref, "opacity": 0.5 }),
+    )
+    .await;
+    assert_ok(&opacidade, "clip_set_opacity");
+
+    // --- sessão: undo/redo/status/history -------------------------------
+    let status = chamar(&client, "session_status", serde_json::json!({})).await;
+    assert_ok(&status, "session_status");
+    assert_eq!(status["projeto_aberto"], Value::Bool(true));
+    let profundidade_antes = status["profundidade_historico"].as_u64().unwrap();
+    assert!(profundidade_antes > 0, "deveria ter histórico depois de tantas edições");
+
+    let historico = chamar(&client, "session_history", serde_json::json!({})).await;
+    assert_ok(&historico, "session_history");
+    assert_eq!(historico["historico"].as_array().unwrap().len() as u64, profundidade_antes);
+
+    let desfeito = chamar(&client, "session_undo", serde_json::json!({})).await;
+    assert_ok(&desfeito, "session_undo");
+    assert_eq!(desfeito["passos_desfeitos"], Value::from(1));
+
+    let refeito = chamar(&client, "session_redo", serde_json::json!({})).await;
+    assert_ok(&refeito, "session_redo");
+    assert_eq!(refeito["passos_refeitos"], Value::from(1));
+
+    // --- filtros ---------------------------------------------------------
+    let disponiveis = chamar(&client, "filter_list_available", serde_json::json!({})).await;
+    assert_ok(&disponiveis, "filter_list_available");
+    assert!(
+        disponiveis["filtros_disponiveis"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|s| s == "brightness")),
+        "esperava \"brightness\" na lista de filtros disponíveis: {disponiveis}"
+    );
+
+    let filtro = chamar(
+        &client,
+        "filter_add",
+        serde_json::json!({ "clip_ref": clip_ref, "service": "brightness" }),
+    )
+    .await;
+    assert_ok(&filtro, "filter_add");
+    // pode já ter um filtro "brightness" de clip_set_opacity; só confirmamos que agora há pelo menos 1
+    let lista_filtros = chamar(&client, "filter_list", serde_json::json!({ "clip_ref": clip_ref })).await;
+    assert_ok(&lista_filtros, "filter_list");
+    assert!(!lista_filtros["filtros"].as_array().unwrap().is_empty());
+    let filter_id = filtro["filter_id"].as_str().unwrap().to_string();
+
+    let ajustado = chamar(
+        &client,
+        "filter_set_param",
+        serde_json::json!({ "clip_ref": clip_ref, "filter_id": filter_id, "param": "level", "value": "2.0" }),
+    )
+    .await;
+    assert_ok(&ajustado, "filter_set_param");
+
+    let removido_filtro = chamar(
+        &client,
+        "filter_remove",
+        serde_json::json!({ "clip_ref": clip_ref, "filter_id": filter_id }),
+    )
+    .await;
+    assert_ok(&removido_filtro, "filter_remove");
+
+    // --- transições -------------------------------------------------------
+    let transicao = chamar(
+        &client,
+        "transition_add",
+        serde_json::json!({ "service": "luma", "track_a": track_a, "track_b": track_b }),
+    )
+    .await;
+    assert_ok(&transicao, "transition_add");
+    let transition_id = transicao["transition_id"].as_str().unwrap().to_string();
+
+    let lista_transicoes = chamar(&client, "transition_list", serde_json::json!({})).await;
+    assert_ok(&lista_transicoes, "transition_list");
+    assert_eq!(lista_transicoes["transicoes"].as_array().unwrap().len(), 1);
+
+    let transicao_ajustada = chamar(
+        &client,
+        "transition_set",
+        serde_json::json!({ "transition_id": transition_id, "param": "softness", "value": "0.3" }),
+    )
+    .await;
+    assert_ok(&transicao_ajustada, "transition_set");
+
+    let transicao_removida = chamar(
+        &client,
+        "transition_remove",
+        serde_json::json!({ "transition_id": transition_id }),
+    )
+    .await;
+    assert_ok(&transicao_removida, "transition_remove");
+
+    // --- guias -----------------------------------------------------------
+    let guia = chamar(&client, "guide_add", serde_json::json!({ "position": 100, "comment": "corte 1" })).await;
+    assert_ok(&guia, "guide_add");
+    let guide_id = guia["guide_id"].as_str().unwrap().to_string();
+
+    let lista_guias = chamar(&client, "guide_list", serde_json::json!({})).await;
+    assert_ok(&lista_guias, "guide_list");
+    assert_eq!(lista_guias["guias"].as_array().unwrap().len(), 1);
+
+    let guia_lida = chamar(&client, "guide_get", serde_json::json!({ "guide_id": guide_id })).await;
+    assert_ok(&guia_lida, "guide_get");
+    assert_eq!(guia_lida["position"], Value::from(100));
+
+    chamar(
+        &client,
+        "guide_update",
+        serde_json::json!({ "guide_id": guide_id, "position": 150 }),
+    )
+    .await;
+    let guia_atualizada = chamar(&client, "guide_get", serde_json::json!({ "guide_id": guide_id })).await;
+    assert_eq!(guia_atualizada["position"], Value::from(150));
+    assert_eq!(guia_atualizada["comment"], Value::from("corte 1"), "não deveria ter mudado o comentário");
+
+    let guia_removida = chamar(&client, "guide_remove", serde_json::json!({ "guide_id": guide_id })).await;
+    assert_ok(&guia_removida, "guide_remove");
+    assert!(chamar(&client, "guide_list", serde_json::json!({})).await["guias"].as_array().unwrap().is_empty());
+
+    // --- marcadores --------------------------------------------------------
+    let marcador_timeline = chamar(
+        &client,
+        "marker_add",
+        serde_json::json!({ "position": 20, "comment": "marcador geral" }),
+    )
+    .await;
+    assert_ok(&marcador_timeline, "marker_add (timeline)");
+    let marcador_clipe = chamar(
+        &client,
+        "marker_add",
+        serde_json::json!({ "position": 5, "comment": "marcador do clipe", "clip_ref": clip_ref }),
+    )
+    .await;
+    assert_ok(&marcador_clipe, "marker_add (clipe)");
+
+    let lista_marcadores = chamar(&client, "marker_list", serde_json::json!({})).await;
+    assert_ok(&lista_marcadores, "marker_list");
+    assert_eq!(lista_marcadores["marcadores"].as_array().unwrap().len(), 2);
+
+    let id_marcador_timeline = marcador_timeline["marker_id"].as_str().unwrap().to_string();
+    let marcador_removido = chamar(&client, "marker_remove", serde_json::json!({ "marker_id": id_marcador_timeline })).await;
+    assert_ok(&marcador_removido, "marker_remove");
+    assert_eq!(
+        chamar(&client, "marker_list", serde_json::json!({})).await["marcadores"].as_array().unwrap().len(),
+        1
+    );
+
+    let _ = std::fs::remove_file(&midia);
     client.cancel().await.expect("fechamento limpo do cliente");
 }

@@ -4,6 +4,13 @@
 //! `server.rs`, que só delega para estes métodos.
 
 mod bin;
+mod clip;
 mod export;
+mod filter;
+mod guide;
+mod marker;
 mod project;
+mod session;
 mod timeline;
+mod track;
+mod transition;

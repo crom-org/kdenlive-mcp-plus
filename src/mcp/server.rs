@@ -71,6 +71,22 @@ pub(crate) fn erro(mensagem: impl Into<String>) -> Value {
 
 const SEM_PROJETO_ABERTO: &str = "nenhum projeto aberto; chame project_new ou project_open primeiro";
 
+/// Separa uma referência de clipe `"<track_id>:<índice>"` (convenção deste
+/// servidor, ver `model::document`) em suas duas partes.
+pub(crate) fn parse_clip_ref(clip_ref: &str) -> Result<(String, usize), Value> {
+    let (track_id, indice) = clip_ref.rsplit_once(':').ok_or_else(|| {
+        erro(format!(
+            "clip_ref inválido: \"{clip_ref}\". Esperava o formato \"<track_id>:<índice>\""
+        ))
+    })?;
+    let indice = indice.parse::<usize>().map_err(|_| {
+        erro(format!(
+            "clip_ref inválido: \"{clip_ref}\". O índice (\"{indice}\") precisa ser um número"
+        ))
+    })?;
+    Ok((track_id.to_string(), indice))
+}
+
 impl KdenliveMcpServer {
     /// Acesso de leitura ao projeto aberto. Devolve o erro padrão se
     /// nenhum projeto estiver aberto.
@@ -367,6 +383,281 @@ impl KdenliveMcpServer {
         Parameters(params): Parameters<PreviewFrameParams>,
     ) -> Json<Value> {
         Json(self.preview_frame_impl(params).await)
+    }
+
+    // -- Trilha (Fase 2) --------------------------------------------------
+
+    #[tool(
+        description = "Report detailed info for a single track: kind (video/audio), name, \
+         locked/hidden/muted state, clip count and length in frames. Parameter: track_id \
+         (required)."
+    )]
+    pub async fn track_get_info(&self, Parameters(params): Parameters<TrackIdParams>) -> Json<Value> {
+        Json(self.track_get_info_impl(params).await)
+    }
+
+    #[tool(description = "Rename a track. Parameters: track_id, name (both required).")]
+    pub async fn track_set_name(&self, Parameters(params): Parameters<TrackSetNameParams>) -> Json<Value> {
+        Json(self.track_set_name_impl(params).await)
+    }
+
+    #[tool(
+        description = "Lock/unlock a track (editing-only concept; does not affect rendering). \
+         Parameters: track_id, value (both required)."
+    )]
+    pub async fn track_set_locked(&self, Parameters(params): Parameters<TrackBoolParams>) -> Json<Value> {
+        Json(self.track_set_locked_impl(params).await)
+    }
+
+    #[tool(
+        description = "Hide/show a track's video, independently of its mute state. Parameters: \
+         track_id, value (both required)."
+    )]
+    pub async fn track_set_hidden(&self, Parameters(params): Parameters<TrackBoolParams>) -> Json<Value> {
+        Json(self.track_set_hidden_impl(params).await)
+    }
+
+    #[tool(
+        description = "Mute/unmute a track's audio, independently of its hidden state. \
+         Parameters: track_id, value (both required)."
+    )]
+    pub async fn track_set_muted(&self, Parameters(params): Parameters<TrackBoolParams>) -> Json<Value> {
+        Json(self.track_set_muted_impl(params).await)
+    }
+
+    #[tool(
+        description = "Move a track up one position (swap with the previous one). Parameter: \
+         track_id (required). Returns ok:false if already the first track."
+    )]
+    pub async fn track_move_up(&self, Parameters(params): Parameters<TrackIdParams>) -> Json<Value> {
+        Json(self.track_move_up_impl(params).await)
+    }
+
+    #[tool(
+        description = "Move a track down one position (swap with the next one). Parameter: \
+         track_id (required). Returns ok:false if already the last track."
+    )]
+    pub async fn track_move_down(&self, Parameters(params): Parameters<TrackIdParams>) -> Json<Value> {
+        Json(self.track_move_down_impl(params).await)
+    }
+
+    // -- Clipe da timeline (Fase 2) -----------------------------------------
+
+    #[tool(
+        description = "Report timeline clip properties: producer id, in/out, current speed and \
+         whether it is reversed, and the list of filters attached to it. Parameter: clip_ref \
+         (required, \"<track_id>:<index>\")."
+    )]
+    pub async fn clip_get_properties(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Value> {
+        Json(self.clip_get_properties_impl(params).await)
+    }
+
+    #[tool(
+        description = "Set playback speed of a timeline clip (1.0=normal, 2.0=2x, 0.5=half, \
+         negative=reverse), by wrapping the clip's producer in a libmlt \"timewarp\" producer \
+         (verified to work correctly with real media files in this project's own tests; \
+         behavior with synthetic color/tone sources is not guaranteed). Parameters: clip_ref, \
+         speed (both required). This only affects this specific clip instance, not the shared \
+         bin producer or other placements of it."
+    )]
+    pub async fn clip_set_speed(&self, Parameters(params): Parameters<ClipSetSpeedParams>) -> Json<Value> {
+        Json(self.clip_set_speed_impl(params).await)
+    }
+
+    #[tool(
+        description = "Reverse playback direction of a timeline clip (toggles the sign of its \
+         current speed; same underlying mechanism as clip_set_speed). Parameter: clip_ref \
+         (required)."
+    )]
+    pub async fn clip_reverse(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Value> {
+        Json(self.clip_reverse_impl(params).await)
+    }
+
+    #[tool(
+        description = "Set opacity of a timeline clip (0.0 transparent .. 1.0 opaque), via the \
+         libmlt \"brightness\" filter's alpha parameter, attached to this specific clip (not \
+         the shared producer). Parameters: clip_ref, opacity (both required)."
+    )]
+    pub async fn clip_set_opacity(&self, Parameters(params): Parameters<ClipSetOpacityParams>) -> Json<Value> {
+        Json(self.clip_set_opacity_impl(params).await)
+    }
+
+    #[tool(
+        description = "Set a color label on a bin clip (hex like \"#ff0000\" or a name). This \
+         project's own convention, not confirmed to match what real Kdenlive stores. Parameters: \
+         clip_id (the bin clip's id, required), color (required)."
+    )]
+    pub async fn clip_set_color(&self, Parameters(params): Parameters<BinClipColorParams>) -> Json<Value> {
+        Json(self.clip_set_color_impl(params).await)
+    }
+
+    #[tool(
+        description = "Add or update a free-text note on a bin clip. This project's own \
+         convention, not confirmed to match what real Kdenlive stores. Parameters: clip_id (the \
+         bin clip's id, required), note (required)."
+    )]
+    pub async fn clip_add_note(&self, Parameters(params): Parameters<BinClipNoteParams>) -> Json<Value> {
+        Json(self.clip_add_note_impl(params).await)
+    }
+
+    // -- Sessão: undo/redo (Fase 2) ------------------------------------------
+
+    #[tool(
+        description = "Undo the most recent change(s) to the open project (snapshot-based, up to \
+         50 history entries). Parameter: steps (optional, default 1). Unifies the original \
+         catalog's session_undo/session_undo_step into one tool."
+    )]
+    pub async fn session_undo(&self, Parameters(params): Parameters<SessionStepsParams>) -> Json<Value> {
+        Json(self.session_undo_impl(params).await)
+    }
+
+    #[tool(
+        description = "Redo the most recently undone change(s). Parameter: steps (optional, \
+         default 1). Unifies the original catalog's session_redo/session_redo_step into one \
+         tool. Any new edit after an undo clears the redo stack."
+    )]
+    pub async fn session_redo(&self, Parameters(params): Parameters<SessionStepsParams>) -> Json<Value> {
+        Json(self.session_redo_impl(params).await)
+    }
+
+    #[tool(
+        description = "Report session state: whether a project is open, its modified flag, undo \
+         history depth and redo steps available. Takes no parameters."
+    )]
+    pub async fn session_status(&self) -> Json<Value> {
+        Json(self.session_status_impl().await)
+    }
+
+    #[tool(
+        description = "List all undo history entries, oldest first, with a short description of \
+         each change. Takes no parameters. Returns ok:false if no project is open."
+    )]
+    pub async fn session_history(&self) -> Json<Value> {
+        Json(self.session_history_impl().await)
+    }
+
+    // -- Filtros (Fase 2) -----------------------------------------------------
+
+    #[tool(
+        description = "Attach a video/audio effect (libmlt filter service, e.g. \"brightness\", \
+         \"qtblend\") to a timeline clip. Call filter_list_available for the full list of \
+         services this libmlt build exposes. Parameters: clip_ref, service (both required). \
+         Returns ok:true with the new filter's id (unique within this clip, used by \
+         filter_remove/filter_set_param)."
+    )]
+    pub async fn filter_add(&self, Parameters(params): Parameters<FilterAddParams>) -> Json<Value> {
+        Json(self.filter_add_impl(params).await)
+    }
+
+    #[tool(description = "Detach a filter from a clip. Parameters: clip_ref, filter_id (both required).")]
+    pub async fn filter_remove(&self, Parameters(params): Parameters<FilterRemoveParams>) -> Json<Value> {
+        Json(self.filter_remove_impl(params).await)
+    }
+
+    #[tool(
+        description = "Update a single parameter on an active filter. Parameters: clip_ref, \
+         filter_id, param, value (all required, value as a string)."
+    )]
+    pub async fn filter_set_param(&self, Parameters(params): Parameters<FilterSetParamParams>) -> Json<Value> {
+        Json(self.filter_set_param_impl(params).await)
+    }
+
+    #[tool(description = "List all active filters on a specific timeline clip. Parameter: clip_ref (required).")]
+    pub async fn filter_list(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Value> {
+        Json(self.filter_list_impl(params).await)
+    }
+
+    #[tool(
+        description = "Discover all filter services the libmlt runtime exposes (by running \
+         \"melt -query filters\", a plain subprocess call — never the libmlt engine directly \
+         from this server). Takes no parameters."
+    )]
+    pub async fn filter_list_available(&self) -> Json<Value> {
+        Json(self.filter_list_available_impl().await)
+    }
+
+    // -- Transições (Fase 2) ----------------------------------------------------
+
+    #[tool(
+        description = "Create a blend transition (libmlt transition service, e.g. \"luma\" for \
+         crossfade/wipe) between two timeline tracks. Parameters: service, track_a, track_b (all \
+         required, track ids as returned by timeline_add_track/timeline_list)."
+    )]
+    pub async fn transition_add(&self, Parameters(params): Parameters<TransitionAddParams>) -> Json<Value> {
+        Json(self.transition_add_impl(params).await)
+    }
+
+    #[tool(description = "Delete a transition by its id. Parameter: transition_id (required).")]
+    pub async fn transition_remove(&self, Parameters(params): Parameters<TransitionIdParams>) -> Json<Value> {
+        Json(self.transition_remove_impl(params).await)
+    }
+
+    #[tool(
+        description = "Modify a parameter on an existing transition. Parameters: transition_id, \
+         param, value (all required, value as a string)."
+    )]
+    pub async fn transition_set(&self, Parameters(params): Parameters<TransitionSetParamParams>) -> Json<Value> {
+        Json(self.transition_set_impl(params).await)
+    }
+
+    #[tool(description = "List all transitions on the timeline. Takes no parameters.")]
+    pub async fn transition_list(&self) -> Json<Value> {
+        Json(self.transition_list_impl().await)
+    }
+
+    // -- Guias e marcadores (Fase 2) ---------------------------------------------
+
+    #[tool(
+        description = "Place a navigation guide on the project timeline. This project's own \
+         convention (not confirmed to match real Kdenlive's internal guide format — see this \
+         project's documentation). Parameters: position (frames, required), comment (required)."
+    )]
+    pub async fn guide_add(&self, Parameters(params): Parameters<GuideAddParams>) -> Json<Value> {
+        Json(self.guide_add_impl(params).await)
+    }
+
+    #[tool(description = "Delete a guide by id. Parameter: guide_id (required).")]
+    pub async fn guide_remove(&self, Parameters(params): Parameters<GuideIdParams>) -> Json<Value> {
+        Json(self.guide_remove_impl(params).await)
+    }
+
+    #[tool(description = "List all guide markers on the timeline. Takes no parameters.")]
+    pub async fn guide_list(&self) -> Json<Value> {
+        Json(self.guide_list_impl().await)
+    }
+
+    #[tool(description = "Get a single guide by id. Parameter: guide_id (required).")]
+    pub async fn guide_get(&self, Parameters(params): Parameters<GuideIdParams>) -> Json<Value> {
+        Json(self.guide_get_impl(params).await)
+    }
+
+    #[tool(
+        description = "Update a guide's position and/or comment. Parameters: guide_id \
+         (required), position (optional), comment (optional; at least one of the two should be \
+         given)."
+    )]
+    pub async fn guide_update(&self, Parameters(params): Parameters<GuideUpdateParams>) -> Json<Value> {
+        Json(self.guide_update_impl(params).await)
+    }
+
+    #[tool(
+        description = "Add a timeline marker, or a clip marker if clip_ref is given (markers are \
+         a separate concept from guides in this project's model, following the original \
+         catalog). Parameters: position (frames, required), comment (required), clip_ref \
+         (optional, \"<track_id>:<index>\")."
+    )]
+    pub async fn marker_add(&self, Parameters(params): Parameters<MarkerAddParams>) -> Json<Value> {
+        Json(self.marker_add_impl(params).await)
+    }
+
+    #[tool(description = "List all markers (timeline and clip). Takes no parameters.")]
+    pub async fn marker_list(&self) -> Json<Value> {
+        Json(self.marker_list_impl().await)
+    }
+
+    #[tool(description = "Remove a marker by id. Parameter: marker_id (required).")]
+    pub async fn marker_remove(&self, Parameters(params): Parameters<MarkerIdParams>) -> Json<Value> {
+        Json(self.marker_remove_impl(params).await)
     }
 }
 

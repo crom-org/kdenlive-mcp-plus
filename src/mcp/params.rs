@@ -123,3 +123,154 @@ pub struct PreviewFrameParams {
     #[serde(default)]
     pub overwrite: bool,
 }
+
+// -- Trilha -----------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrackIdParams {
+    pub track_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrackBoolParams {
+    pub track_id: String,
+    pub value: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrackSetNameParams {
+    pub track_id: String,
+    pub name: String,
+}
+
+// -- Clipe --------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClipRefParams {
+    /// Referência de clipe no formato `"<track_id>:<índice>"` (devolvida
+    /// por timeline_add_clip/timeline_get_info).
+    pub clip_ref: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClipSetSpeedParams {
+    pub clip_ref: String,
+    /// 1.0 = normal, 2.0 = dobro, 0.5 = metade, negativo = reverso.
+    pub speed: f64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClipSetOpacityParams {
+    pub clip_ref: String,
+    /// 0.0 (transparente) a 1.0 (opaco).
+    pub opacity: f64,
+}
+
+/// `clip_set_color`/`clip_add_note` (do Apêndice B original) atuam sobre o
+/// clipe da **bin**, não sobre um clipe da timeline — por isso usam
+/// `clip_id` (id do produtor), não `clip_ref`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BinClipColorParams {
+    pub clip_id: String,
+    /// Cor em hexadecimal (ex. "#ff0000") ou nome.
+    pub color: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BinClipNoteParams {
+    pub clip_id: String,
+    pub note: String,
+}
+
+// -- Sessão (undo/redo) ------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SessionStepsParams {
+    /// Quantos passos desfazer/refazer. Padrão 1.
+    #[serde(default = "um")]
+    pub steps: usize,
+}
+
+fn um() -> usize {
+    1
+}
+
+// -- Filtros ------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FilterAddParams {
+    pub clip_ref: String,
+    /// Nome do serviço de filtro do libmlt (ex. "brightness", "qtblend").
+    /// Use filter_list_available para a lista completa.
+    pub service: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FilterRemoveParams {
+    pub clip_ref: String,
+    pub filter_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FilterSetParamParams {
+    pub clip_ref: String,
+    pub filter_id: String,
+    pub param: String,
+    pub value: String,
+}
+
+// -- Transições ---------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TransitionAddParams {
+    /// Nome do serviço de transição do libmlt (ex. "luma" para dissolve/wipe).
+    pub service: String,
+    pub track_a: String,
+    pub track_b: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TransitionIdParams {
+    pub transition_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TransitionSetParamParams {
+    pub transition_id: String,
+    pub param: String,
+    pub value: String,
+}
+
+// -- Guias e marcadores ---------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GuideAddParams {
+    pub position: i64,
+    pub comment: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GuideIdParams {
+    pub guide_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GuideUpdateParams {
+    pub guide_id: String,
+    pub position: Option<i64>,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MarkerAddParams {
+    pub position: i64,
+    pub comment: String,
+    /// Se for um marcador de um clipe específico, em vez de um marcador
+    /// geral da timeline: `"<track_id>:<índice>"`.
+    pub clip_ref: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MarkerIdParams {
+    pub marker_id: String,
+}
