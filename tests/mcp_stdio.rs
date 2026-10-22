@@ -133,9 +133,18 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "timeline_add_clip",
             "timeline_add_track",
             "timeline_assemble_ranges",
+            "timeline_get_duration",
             "timeline_get_info",
+            "timeline_get_position",
+            "timeline_get_zoom",
             "timeline_list",
+            "timeline_move_clip",
+            "timeline_remove_clip",
             "timeline_remove_track",
+            "timeline_seek",
+            "timeline_set_zoom",
+            "timeline_split_clip",
+            "timeline_trim_clip",
             "track_get_info",
             "track_move_down",
             "track_move_up",
@@ -904,5 +913,116 @@ async fn fase2_perfis_pastas_da_bin_importar_pasta_e_montagem_em_lote() {
 
     let _ = std::fs::remove_file(&midia);
     let _ = std::fs::remove_dir_all(&pasta_midia);
+    client.cancel().await.expect("fechamento limpo do cliente");
+}
+
+/// Exercita mover/aparar/dividir/remover clipe e posição/zoom da timeline
+/// — Fase 2, grupo 5.
+#[tokio::test]
+async fn fase2_mover_aparar_dividir_remover_clipe_e_posicao_zoom() {
+    let client = iniciar_cliente().await;
+
+    chamar(&client, "project_new", serde_json::json!({})).await;
+    let trilha = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "video" })).await;
+    let track_id = trilha["track_id"].as_str().unwrap().to_string();
+
+    let midia = caminho_temporario("fase2_grupo5_midia.mp4");
+    let _ = std::fs::remove_file(&midia);
+    chamar(
+        &client,
+        "export_render",
+        serde_json::json!({
+            "project_path": caminho_fixture().to_string_lossy(),
+            "output_path": midia.to_string_lossy(),
+            "preset": "h264_hq",
+            "overwrite": true,
+        }),
+    )
+    .await;
+    let importado = chamar(&client, "bin_import_clip", serde_json::json!({ "path": midia.to_string_lossy() })).await;
+    let clip_id = importado["clip_id"].as_str().unwrap().to_string();
+
+    let c0 = chamar(
+        &client,
+        "timeline_add_clip",
+        serde_json::json!({ "track_id": track_id, "producer_id": clip_id, "in_frame": 0, "out_frame": 99, "position": 0 }),
+    )
+    .await;
+    let clip_ref_0 = c0["clip_ref"].as_str().unwrap().to_string();
+    let c1 = chamar(
+        &client,
+        "timeline_add_clip",
+        serde_json::json!({ "track_id": track_id, "producer_id": clip_id, "in_frame": 0, "out_frame": 9, "position": 100 }),
+    )
+    .await;
+    let clip_ref_1 = c1["clip_ref"].as_str().unwrap().to_string();
+
+    let duracao = chamar(&client, "timeline_get_duration", serde_json::json!({})).await;
+    assert_ok(&duracao, "timeline_get_duration");
+    assert_eq!(duracao["duracao_quadros"], Value::from(110));
+
+    // --- divide o primeiro clipe em 2 ------------------------------------
+    let dividido = chamar(
+        &client,
+        "timeline_split_clip",
+        serde_json::json!({ "clip_ref": clip_ref_0, "split_at": 40 }),
+    )
+    .await;
+    assert_ok(&dividido, "timeline_split_clip");
+    let ref_primeiro = dividido["clip_ref_primeiro"].as_str().unwrap().to_string();
+    let ref_segundo = dividido["clip_ref_segundo"].as_str().unwrap().to_string();
+
+    let duracao_apos_split = chamar(&client, "timeline_get_duration", serde_json::json!({})).await;
+    assert_eq!(
+        duracao_apos_split["duracao_quadros"], Value::from(110),
+        "dividir não deveria mudar a duração total"
+    );
+
+    // --- apara o primeiro pedaço (encurta) -------------------------------
+    let aparado = chamar(
+        &client,
+        "timeline_trim_clip",
+        serde_json::json!({ "clip_ref": ref_primeiro, "in_frame": 0, "out_frame": 19 }),
+    )
+    .await;
+    assert_ok(&aparado, "timeline_trim_clip");
+    let duracao_apos_trim = chamar(&client, "timeline_get_duration", serde_json::json!({})).await;
+    assert_eq!(
+        duracao_apos_trim["duracao_quadros"], Value::from(90),
+        "encurtar o primeiro pedaço de 40 pra 20 quadros deveria encurtar a trilha em 20"
+    );
+
+    // --- move o segundo pedaço do split para o início --------------------
+    let movido = chamar(
+        &client,
+        "timeline_move_clip",
+        serde_json::json!({ "clip_ref": ref_segundo, "new_position": 0 }),
+    )
+    .await;
+    assert_ok(&movido, "timeline_move_clip");
+
+    // --- remove um clipe (clip_ref_1, o segundo clipe original) ----------
+    let removido = chamar(&client, "timeline_remove_clip", serde_json::json!({ "clip_ref": clip_ref_1 })).await;
+    assert_ok(&removido, "timeline_remove_clip");
+
+    // --- posição (playhead) e zoom: conceitos só de sessão -----------------
+    let posicao_inicial = chamar(&client, "timeline_get_position", serde_json::json!({})).await;
+    assert_ok(&posicao_inicial, "timeline_get_position");
+    assert_eq!(posicao_inicial["position"], Value::from(0));
+
+    let buscado = chamar(&client, "timeline_seek", serde_json::json!({ "position": 42 })).await;
+    assert_ok(&buscado, "timeline_seek");
+    let posicao_depois = chamar(&client, "timeline_get_position", serde_json::json!({})).await;
+    assert_eq!(posicao_depois["position"], Value::from(42));
+
+    let zoom_invalido = chamar(&client, "timeline_set_zoom", serde_json::json!({ "zoom": 20.0 })).await;
+    assert_eq!(zoom_invalido["ok"], Value::Bool(false), "zoom fora do intervalo deveria falhar");
+
+    let zoom_ok = chamar(&client, "timeline_set_zoom", serde_json::json!({ "zoom": 2.5 })).await;
+    assert_ok(&zoom_ok, "timeline_set_zoom");
+    let zoom_lido = chamar(&client, "timeline_get_zoom", serde_json::json!({})).await;
+    assert_eq!(zoom_lido["zoom"], Value::from(2.5));
+
+    let _ = std::fs::remove_file(&midia);
     client.cancel().await.expect("fechamento limpo do cliente");
 }

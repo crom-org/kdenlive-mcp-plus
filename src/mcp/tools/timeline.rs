@@ -4,9 +4,11 @@
 use serde_json::{Value, json};
 
 use crate::mcp::params::{
-    TimelineAddClipParams, TimelineAddTrackParams, TimelineAssembleRangesParams, TimelineRemoveTrackParams,
+    ClipRefParams, TimelineAddClipParams, TimelineAddTrackParams, TimelineAssembleRangesParams,
+    TimelineMoveClipParams, TimelineRemoveTrackParams, TimelineSeekParams, TimelineSetZoomParams,
+    TimelineSplitClipParams, TimelineTrimClipParams,
 };
-use crate::mcp::server::{KdenliveMcpServer, erro};
+use crate::mcp::server::{KdenliveMcpServer, erro, parse_clip_ref};
 use crate::model::document::{self, TrackKind};
 
 fn parse_kind(texto: &str) -> Result<TrackKind, Value> {
@@ -188,6 +190,144 @@ impl KdenliveMcpServer {
         match resultado {
             Ok(refs) => json!({ "ok": true, "clip_refs": refs }),
             Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_remove_clip_impl(&self, params: ClipRefParams) -> Value {
+        let (track_id, indice) = match parse_clip_ref(&params.clip_ref) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let descricao = format!("remover clipe {}", params.clip_ref);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                document::remove_clip_from_track(&mut session.doc, &track_id, indice)?;
+                session.mark_modified();
+                Ok(())
+            })
+            .await;
+        match resultado {
+            Ok(()) => json!({ "ok": true, "clip_ref": params.clip_ref }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_move_clip_impl(&self, params: TimelineMoveClipParams) -> Value {
+        let (track_id, indice) = match parse_clip_ref(&params.clip_ref) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let descricao = format!("mover clipe {} para {}", params.clip_ref, params.new_position);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                let novo_indice = document::move_clip(&mut session.doc, &track_id, indice, params.new_position)?;
+                session.mark_modified();
+                Ok(novo_indice)
+            })
+            .await;
+        match resultado {
+            Ok(novo_indice) => json!({ "ok": true, "clip_ref": format!("{track_id}:{novo_indice}") }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_trim_clip_impl(&self, params: TimelineTrimClipParams) -> Value {
+        let (track_id, indice) = match parse_clip_ref(&params.clip_ref) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let descricao = format!("aparar clipe {}", params.clip_ref);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                document::trim_clip(&mut session.doc, &track_id, indice, params.in_frame, params.out_frame)?;
+                session.mark_modified();
+                Ok(())
+            })
+            .await;
+        match resultado {
+            Ok(()) => json!({
+                "ok": true,
+                "clip_ref": params.clip_ref,
+                "in_frame": params.in_frame,
+                "out_frame": params.out_frame,
+            }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_split_clip_impl(&self, params: TimelineSplitClipParams) -> Value {
+        let (track_id, indice) = match parse_clip_ref(&params.clip_ref) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let descricao = format!("dividir clipe {} em {}", params.clip_ref, params.split_at);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                let (primeiro, segundo) = document::split_clip(&mut session.doc, &track_id, indice, params.split_at)?;
+                session.mark_modified();
+                Ok((primeiro, segundo))
+            })
+            .await;
+        match resultado {
+            Ok((primeiro, segundo)) => json!({
+                "ok": true,
+                "clip_ref_primeiro": format!("{track_id}:{primeiro}"),
+                "clip_ref_segundo": format!("{track_id}:{segundo}"),
+            }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_get_duration_impl(&self) -> Value {
+        match self.with_session(|s| document::project_duration(&s.doc)).await {
+            Ok(duracao) => json!({ "ok": true, "duracao_quadros": duracao }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_get_position_impl(&self) -> Value {
+        match self.with_session(|s| s.playhead).await {
+            Ok(posicao) => json!({ "ok": true, "position": posicao }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_seek_impl(&self, params: TimelineSeekParams) -> Value {
+        if params.position < 0 {
+            return erro("position não pode ser negativa".to_string());
+        }
+        let mut guard = self.session.lock().await;
+        match guard.as_mut() {
+            Some(session) => {
+                session.playhead = params.position;
+                json!({ "ok": true, "position": params.position })
+            }
+            None => erro("nenhum projeto aberto; chame project_new ou project_open primeiro"),
+        }
+    }
+
+    pub(crate) async fn timeline_get_zoom_impl(&self) -> Value {
+        match self.with_session(|s| s.zoom).await {
+            Ok(zoom) => json!({ "ok": true, "zoom": zoom }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_set_zoom_impl(&self, params: TimelineSetZoomParams) -> Value {
+        if !(0.1..=10.0).contains(&params.zoom) {
+            return erro("zoom precisa estar entre 0.1 e 10.0".to_string());
+        }
+        let mut guard = self.session.lock().await;
+        match guard.as_mut() {
+            Some(session) => {
+                session.zoom = params.zoom;
+                json!({ "ok": true, "zoom": params.zoom })
+            }
+            None => erro("nenhum projeto aberto; chame project_new ou project_open primeiro"),
         }
     }
 }

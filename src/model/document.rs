@@ -657,10 +657,126 @@ pub fn track_length(playlist: &Element) -> i64 {
     playlist.children.iter().filter_map(XMLNode::as_element).map(entry_length).sum()
 }
 
+/// Garante espaço para `node` (um `<entry>` ou `<blank>` já montado, com
+/// seus próprios atributos) exatamente em `position` dentro de `playlist`,
+/// e o insere lá. Devolve o índice lógico (contando só `entry`/`blank`) do
+/// nó inserido.
+///
+/// Comportamento:
+/// - `position` além do fim atual: cria um `<blank>` de preenchimento até
+///   lá (se precisar) e acrescenta `node` no fim.
+/// - `position` cai exatamente no **início** de um `<entry>`/`<blank>`
+///   existente: `node` é inserido ali, **antes** dele — como as posições
+///   do MLT são implícitas (soma dos comprimentos anteriores), isso
+///   empurra esse slot e todos os seguintes para depois, sem precisar
+///   reescrevê-los. É o único "deslocamento" que este projeto faz sozinho.
+/// - `position` cai **dentro** de um `<blank>` (não no início): o `<blank>`
+///   é dividido em dois, com `node` entre eles.
+/// - `position` cai **dentro** de um `<entry>` (não no início): erro — para
+///   caber ali seria preciso dividir esse clipe também, o que esta fase
+///   não faz.
+fn insert_node_at(playlist: &mut Element, position: i64, node: Element) -> Result<usize, ModelError> {
+    if position < 0 {
+        return Err(ModelError::Invalid("a posição não pode ser negativa".to_string()));
+    }
+    let total = track_length(playlist);
+
+    if position >= total {
+        if position > total {
+            let mut blank = Element::new("blank");
+            blank.attributes.insert("length".to_string(), (position - total).to_string());
+            playlist.children.push(XMLNode::Element(blank));
+        }
+        playlist.children.push(XMLNode::Element(node));
+        return Ok(contar_slots(playlist) - 1);
+    }
+
+    // Acha o slot que contém `position` (0 <= position < total, já garantido acima).
+    let mut acumulado: i64 = 0;
+    let mut alvo = 0usize;
+    for (i, child) in playlist.children.iter().enumerate() {
+        if let XMLNode::Element(e) = child
+            && (e.name == "entry" || e.name == "blank")
+        {
+            let len = entry_length(e);
+            if position < acumulado + len {
+                alvo = i;
+                break;
+            }
+            acumulado += len;
+        }
+    }
+    let slot_comeco = acumulado;
+    let antes = position - slot_comeco;
+    let existente = playlist.children[alvo].as_element().cloned().expect("é um Element (filtrado acima)");
+
+    if existente.name == "entry" {
+        if antes == 0 {
+            playlist.children.insert(alvo, XMLNode::Element(node));
+            return Ok(contar_slots_antes(playlist, alvo));
+        }
+        return Err(ModelError::Invalid(format!(
+            "a posição {position} cai dentro de um clipe já existente; esta fase não divide um \
+             clipe para abrir espaço (\"ripple\" parcial não suportado)"
+        )));
+    }
+
+    // `existente` é um `<blank>`: divide em até dois blanks ao redor do novo nó.
+    let blank_len = entry_length(&existente);
+    let depois = blank_len - antes;
+    playlist.children.remove(alvo);
+    let mut novos = Vec::with_capacity(3);
+    if antes > 0 {
+        let mut b = Element::new("blank");
+        b.attributes.insert("length".to_string(), antes.to_string());
+        novos.push(XMLNode::Element(b));
+    }
+    let posicao_bruta_do_node = alvo + novos.len();
+    novos.push(XMLNode::Element(node));
+    if depois > 0 {
+        let mut b = Element::new("blank");
+        b.attributes.insert("length".to_string(), depois.to_string());
+        novos.push(XMLNode::Element(b));
+    }
+    for (deslocamento, n) in novos.into_iter().enumerate() {
+        playlist.children.insert(alvo + deslocamento, n);
+    }
+    Ok(contar_slots_antes(playlist, posicao_bruta_do_node))
+}
+
+fn contar_slots(playlist: &Element) -> usize {
+    playlist
+        .children
+        .iter()
+        .filter(|n| matches!(n, XMLNode::Element(e) if e.name == "entry" || e.name == "blank"))
+        .count()
+}
+
+/// Quantos slots (`entry`/`blank`) existem antes do índice bruto
+/// `indice_bruto` em `playlist.children` — ou seja, o índice lógico do
+/// slot que está exatamente em `indice_bruto`.
+fn contar_slots_antes(playlist: &Element, indice_bruto: usize) -> usize {
+    playlist.children[..indice_bruto]
+        .iter()
+        .filter(|n| matches!(n, XMLNode::Element(e) if e.name == "entry" || e.name == "blank"))
+        .count()
+}
+
+/// Posição absoluta (em quadros) de onde o slot lógico `slot_index` começa.
+fn position_of_slot(playlist: &Element, slot_index: usize) -> i64 {
+    playlist
+        .children
+        .iter()
+        .filter_map(XMLNode::as_element)
+        .filter(|e| e.name == "entry" || e.name == "blank")
+        .take(slot_index)
+        .map(entry_length)
+        .sum()
+}
+
 /// Posiciona um clipe (produtor já existente, da bin ou não) numa trilha.
-/// Se `position` ficar depois do fim atual da trilha, um `<blank>` de
-/// preenchimento é criado; se sobrepuser um clipe existente, é um erro.
-/// Devolve o índice da entrada criada (para montar a referência de clipe
+/// Ver `insert_node_at` para a semântica exata de `position`. Devolve o
+/// índice da entrada criada (para montar a referência de clipe
 /// `"<track_id>:<índice>"`).
 pub fn add_clip_to_track(
     root: &mut Element,
@@ -681,32 +797,12 @@ pub fn add_clip_to_track(
 
     let playlist = find_playlist_mut(root, track_id)
         .ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {track_id}")))?;
-    let current_len = track_length(playlist);
-
-    if position > current_len {
-        let mut blank = Element::new("blank");
-        blank.attributes.insert("length".to_string(), (position - current_len).to_string());
-        playlist.children.push(XMLNode::Element(blank));
-    } else if position < current_len {
-        return Err(ModelError::Invalid(format!(
-            "posição {position} sobrepõe clipes existentes nesta trilha (fim atual: {current_len}); \
-             esta fase não faz inserção com deslocamento (\"ripple\")"
-        )));
-    }
 
     let mut entry = Element::new("entry");
     entry.attributes.insert("producer".to_string(), producer_id.to_string());
     entry.attributes.insert("in".to_string(), clip_in.to_string());
     entry.attributes.insert("out".to_string(), clip_out.to_string());
-    playlist.children.push(XMLNode::Element(entry));
-
-    let index = playlist
-        .children
-        .iter()
-        .filter(|n| matches!(n, XMLNode::Element(e) if e.name == "entry" || e.name == "blank"))
-        .count()
-        - 1;
-    Ok(index)
+    insert_node_at(playlist, position, entry)
 }
 
 /// Remove o clipe no índice `index` da trilha `track_id` (vira um `<blank>`
@@ -721,6 +817,73 @@ pub fn remove_clip_from_track(root: &mut Element, track_id: &str, index: usize) 
     blank.attributes.insert("length".to_string(), length.to_string());
     playlist.children[slot_index] = XMLNode::Element(blank);
     Ok(())
+}
+
+/// Reposiciona um clipe já existente na mesma trilha, para uma nova
+/// posição (em quadros). O slot antigo vira um `<blank>` (como
+/// `remove_clip_from_track`) e o clipe é reinserido em `new_position` (ver
+/// `insert_node_at`). Devolve o novo índice do clipe.
+pub fn move_clip(root: &mut Element, track_id: &str, index: usize, new_position: i64) -> Result<usize, ModelError> {
+    let entry = get_clip(root, track_id, index)
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {track_id}:{index}")))?;
+    let producer_id = entry
+        .attributes
+        .get("producer")
+        .cloned()
+        .ok_or_else(|| ModelError::Invalid("entrada sem produtor".to_string()))?;
+    let in_f: i64 = entry.attributes.get("in").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let out_f: i64 = entry.attributes.get("out").and_then(|v| v.parse().ok()).unwrap_or(0);
+
+    remove_clip_from_track(root, track_id, index)?;
+    add_clip_to_track(root, track_id, &producer_id, in_f, out_f, new_position)
+}
+
+/// Ajusta as alças de entrada/saída (`in`/`out`) de um clipe já na
+/// timeline — não é o filtro de recorte de imagem, é o trecho usado do
+/// produtor. Como as posições do MLT são implícitas, encurtar/alongar o
+/// clipe desloca naturalmente tudo que vem depois dele na mesma trilha.
+pub fn trim_clip(root: &mut Element, track_id: &str, index: usize, new_in: i64, new_out: i64) -> Result<(), ModelError> {
+    if new_out < new_in {
+        return Err(ModelError::Invalid(format!("out ({new_out}) não pode ser menor que in ({new_in})")));
+    }
+    let entry = get_clip_mut(root, track_id, index)
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {track_id}:{index}")))?;
+    entry.attributes.insert("in".to_string(), new_in.to_string());
+    entry.attributes.insert("out".to_string(), new_out.to_string());
+    Ok(())
+}
+
+/// Corta um clipe em dois, em `split_at` — um quadro do **produtor**
+/// (então `in < split_at <= out`, não uma posição absoluta na timeline).
+/// O primeiro pedaço fica no mesmo índice, encurtado para `[in, split_at
+/// - 1]`; o segundo pedaço, `[split_at, out]`, é inserido logo depois.
+/// Devolve `(índice do primeiro pedaço, índice do segundo pedaço)`.
+pub fn split_clip(root: &mut Element, track_id: &str, index: usize, split_at: i64) -> Result<(usize, usize), ModelError> {
+    let entry = get_clip(root, track_id, index)
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {track_id}:{index}")))?;
+    let producer_id = entry
+        .attributes
+        .get("producer")
+        .cloned()
+        .ok_or_else(|| ModelError::Invalid("entrada sem produtor".to_string()))?;
+    let in_f: i64 = entry.attributes.get("in").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let out_f: i64 = entry.attributes.get("out").and_then(|v| v.parse().ok()).unwrap_or(0);
+
+    if split_at <= in_f || split_at > out_f {
+        return Err(ModelError::Invalid(format!(
+            "split_at ({split_at}) precisa estar entre {in_f} (exclusive) e {out_f} (inclusive)"
+        )));
+    }
+
+    let playlist = find_playlist(root, track_id)
+        .ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {track_id}")))?;
+    let posicao_do_corte = position_of_slot(playlist, index) + (split_at - in_f);
+
+    let entry_mut = get_clip_mut(root, track_id, index).expect("já confirmado acima que existe");
+    entry_mut.attributes.insert("out".to_string(), (split_at - 1).to_string());
+
+    let segundo_indice = add_clip_to_track(root, track_id, &producer_id, split_at, out_f, posicao_do_corte)?;
+    Ok((index, segundo_indice))
 }
 
 /// Índice, dentro de `playlist.children`, do n-ésimo nó `entry`/`blank`
@@ -1515,6 +1678,92 @@ mod tests {
         assert_eq!(profile_element(&doc).unwrap().attributes.get("height"), Some(&"2160".to_string()));
 
         let erro = set_profile(&mut doc, "perfil-que-nao-existe").expect_err("deveria falhar");
+        assert!(matches!(erro, ModelError::Invalid(_)));
+    }
+
+    #[test]
+    fn inserir_exatamente_no_inicio_de_um_clipe_empurra_o_resto_para_depois() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let p0 = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a", 0, 999).expect("importa a");
+        let p1 = add_bin_clip(&mut doc, "producer1", "/tmp/b.mp4", "b", 0, 999).expect("importa b");
+        let track_id = add_track(&mut doc, "playlist0", TrackKind::Video).expect("cria trilha");
+
+        add_clip_to_track(&mut doc, &track_id, &p0, 0, 49, 0).expect("primeiro clipe, 50 quadros");
+        // insere bem no início (posição 0) — deve empurrar o primeiro clipe para depois
+        let indice = add_clip_to_track(&mut doc, &track_id, &p1, 0, 9, 0).expect("insere no início, 10 quadros");
+        assert_eq!(indice, 0, "o novo clipe deve ficar no índice 0");
+
+        let clipes = list_clips(&doc, &track_id);
+        assert_eq!(clipes, vec![(0, p1.clone(), 0, 9), (1, p0.clone(), 0, 49)]);
+        assert_eq!(project_duration(&doc), 60);
+    }
+
+    #[test]
+    fn inserir_dentro_de_um_blank_divide_o_blank_em_dois() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let p0 = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a", 0, 999).expect("importa");
+        let track_id = add_track(&mut doc, "playlist0", TrackKind::Video).expect("cria trilha");
+
+        // cria um blank de 100 quadros (nenhum clipe na posição 0..99), com um clipe real depois
+        add_clip_to_track(&mut doc, &track_id, &p0, 0, 9, 100).expect("clipe depois de um gap de 100");
+        assert_eq!(track_length(find_playlist(&doc, &track_id).unwrap()), 110);
+
+        // insere outro clipe de 20 quadros no meio do gap (posição 30)
+        let indice = add_clip_to_track(&mut doc, &track_id, &p0, 0, 19, 30).expect("insere no meio do gap");
+        assert_eq!(indice, 1, "deveria ficar entre o blank-antes e o blank-depois");
+        assert_eq!(project_duration(&doc), 130, "o comprimento total não deveria mudar ao preencher um gap");
+    }
+
+    #[test]
+    fn mover_clipe_para_outra_posicao_na_mesma_trilha() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let p0 = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a", 0, 999).expect("importa");
+        let track_id = add_track(&mut doc, "playlist0", TrackKind::Video).expect("cria trilha");
+
+        add_clip_to_track(&mut doc, &track_id, &p0, 0, 9, 0).expect("primeiro clipe (0..9)");
+        add_clip_to_track(&mut doc, &track_id, &p0, 0, 9, 10).expect("segundo clipe (10..19)");
+
+        // move o segundo clipe (índice 1) para o início
+        let novo_indice = move_clip(&mut doc, &track_id, 1, 0).expect("move para o início");
+        assert_eq!(novo_indice, 0);
+        assert_eq!(list_clips(&doc, &track_id).len(), 2, "ainda devem existir 2 clipes, nenhum duplicado ou perdido");
+    }
+
+    #[test]
+    fn aparar_um_clipe_altera_seu_comprimento_e_desloca_o_resto() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let p0 = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a", 0, 999).expect("importa");
+        let track_id = add_track(&mut doc, "playlist0", TrackKind::Video).expect("cria trilha");
+
+        add_clip_to_track(&mut doc, &track_id, &p0, 0, 49, 0).expect("clipe de 50 quadros");
+        add_clip_to_track(&mut doc, &track_id, &p0, 0, 9, 50).expect("segundo clipe logo depois");
+        assert_eq!(project_duration(&doc), 60);
+
+        trim_clip(&mut doc, &track_id, 0, 0, 29).expect("encurta o primeiro clipe para 30 quadros");
+        assert_eq!(project_duration(&doc), 40, "o segundo clipe deveria ter sido empurrado pra mais perto");
+
+        let erro = trim_clip(&mut doc, &track_id, 0, 10, 5).expect_err("out menor que in deveria falhar");
+        assert!(matches!(erro, ModelError::Invalid(_)));
+    }
+
+    #[test]
+    fn dividir_um_clipe_em_dois_pedacos() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let p0 = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a", 0, 999).expect("importa");
+        let track_id = add_track(&mut doc, "playlist0", TrackKind::Video).expect("cria trilha");
+        add_clip_to_track(&mut doc, &track_id, &p0, 0, 99, 0).expect("clipe de 100 quadros");
+
+        let (primeiro, segundo) = split_clip(&mut doc, &track_id, 0, 40).expect("divide em 40");
+        assert_eq!(primeiro, 0);
+        assert_eq!(segundo, 1);
+
+        let clipes = list_clips(&doc, &track_id);
+        assert_eq!(clipes, vec![(0, p0.clone(), 0, 39), (1, p0.clone(), 40, 99)]);
+        assert_eq!(project_duration(&doc), 100, "a duração total não deveria mudar ao dividir");
+
+        let erro = split_clip(&mut doc, &track_id, 0, 0).expect_err("split_at == in deveria falhar");
+        assert!(matches!(erro, ModelError::Invalid(_)));
+        let erro = split_clip(&mut doc, &track_id, 1, 999).expect_err("split_at fora do range deveria falhar");
         assert!(matches!(erro, ModelError::Invalid(_)));
     }
 

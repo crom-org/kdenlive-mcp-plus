@@ -312,6 +312,40 @@ pub struct BinImportFolderParams {
     pub path: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TimelineMoveClipParams {
+    pub clip_ref: String,
+    /// Nova posição, em quadros, na mesma trilha.
+    pub new_position: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TimelineTrimClipParams {
+    pub clip_ref: String,
+    pub in_frame: i64,
+    pub out_frame: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TimelineSplitClipParams {
+    pub clip_ref: String,
+    /// Quadro do **produtor** onde cortar (não uma posição absoluta da
+    /// timeline): precisa estar estritamente depois do `in` e até o `out`
+    /// do clipe.
+    pub split_at: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TimelineSeekParams {
+    pub position: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TimelineSetZoomParams {
+    /// 0.1 a 10.0.
+    pub zoom: f64,
+}
+
 // -- Montagem em lote ---------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]

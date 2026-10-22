@@ -748,6 +748,100 @@ impl KdenliveMcpServer {
     ) -> Json<Value> {
         Json(self.timeline_assemble_ranges_impl(params).await)
     }
+
+    // -- Timeline: mover/aparar/dividir/remover clipe, posição/zoom (Fase 2) --
+
+    #[tool(
+        description = "Delete a clip from the timeline (the slot becomes a blank, keeping \
+         everything else in place). Parameter: clip_ref (required)."
+    )]
+    pub async fn timeline_remove_clip(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Value> {
+        Json(self.timeline_remove_clip_impl(params).await)
+    }
+
+    #[tool(
+        description = "Reposition a clip on the same track to a new time position (in frames). \
+         See timeline_add_clip for the exact placement semantics (gaps/boundaries). Parameters: \
+         clip_ref, new_position (both required). Returns ok:true with the clip's new clip_ref \
+         (its index may change)."
+    )]
+    pub async fn timeline_move_clip(
+        &self,
+        Parameters(params): Parameters<TimelineMoveClipParams>,
+    ) -> Json<Value> {
+        Json(self.timeline_move_clip_impl(params).await)
+    }
+
+    #[tool(
+        description = "Adjust the in/out trim handles of a timeline clip (not an image crop \
+         filter — it's the range used from the underlying producer). Because MLT positions are \
+         implicit, shortening/lengthening the clip naturally shifts everything after it on the \
+         same track. Parameters: clip_ref, in_frame, out_frame (all required)."
+    )]
+    pub async fn timeline_trim_clip(
+        &self,
+        Parameters(params): Parameters<TimelineTrimClipParams>,
+    ) -> Json<Value> {
+        Json(self.timeline_trim_clip_impl(params).await)
+    }
+
+    #[tool(
+        description = "Cut a clip into two independent pieces at a precise producer frame \
+         offset (split_at refers to the underlying producer's own in/out range, not an absolute \
+         timeline position — it must be strictly after in_frame and at most out_frame). \
+         Parameters: clip_ref, split_at (both required). Returns ok:true with both pieces' \
+         clip_ref strings."
+    )]
+    pub async fn timeline_split_clip(
+        &self,
+        Parameters(params): Parameters<TimelineSplitClipParams>,
+    ) -> Json<Value> {
+        Json(self.timeline_split_clip_impl(params).await)
+    }
+
+    #[tool(
+        description = "Get total timeline duration in frames (the furthest end of any track). \
+         Takes no parameters."
+    )]
+    pub async fn timeline_get_duration(&self) -> Json<Value> {
+        Json(self.timeline_get_duration_impl().await)
+    }
+
+    #[tool(
+        description = "Get the current playhead position (frames). This is a session/UI concept \
+         only — there is no player in this headless server, so it has no effect on rendering; \
+         it is just bookkeeping for the agent. Takes no parameters."
+    )]
+    pub async fn timeline_get_position(&self) -> Json<Value> {
+        Json(self.timeline_get_position_impl().await)
+    }
+
+    #[tool(
+        description = "Set the playhead position (frames) — same session/UI-only bookkeeping as \
+         timeline_get_position. Parameter: position (required, >= 0)."
+    )]
+    pub async fn timeline_seek(&self, Parameters(params): Parameters<TimelineSeekParams>) -> Json<Value> {
+        Json(self.timeline_seek_impl(params).await)
+    }
+
+    #[tool(
+        description = "Get the current timeline zoom level (0.1 .. 10.0). Session/UI-only \
+         bookkeeping, no effect on rendering. Takes no parameters."
+    )]
+    pub async fn timeline_get_zoom(&self) -> Json<Value> {
+        Json(self.timeline_get_zoom_impl().await)
+    }
+
+    #[tool(
+        description = "Set the timeline zoom level. Session/UI-only bookkeeping, no effect on \
+         rendering. Parameter: zoom (required, 0.1 .. 10.0)."
+    )]
+    pub async fn timeline_set_zoom(
+        &self,
+        Parameters(params): Parameters<TimelineSetZoomParams>,
+    ) -> Json<Value> {
+        Json(self.timeline_set_zoom_impl(params).await)
+    }
 }
 
 #[tool_handler]

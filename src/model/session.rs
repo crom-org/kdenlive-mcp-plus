@@ -27,6 +27,11 @@ pub struct Session {
     /// naquele número.
     next_producer_n: u64,
     next_playlist_n: u64,
+    /// Posição do cursor de reprodução e nível de zoom da timeline — só
+    /// conceitos de UI/sessão, sem efeito no render (não há player nesta
+    /// fase, só headless); não são gravados no XML.
+    pub playhead: i64,
+    pub zoom: f64,
 }
 
 impl Session {
@@ -52,6 +57,8 @@ impl Session {
             redo_stack: Vec::new(),
             next_producer_n,
             next_playlist_n,
+            playhead: 0,
+            zoom: 1.0,
         }
     }
 
