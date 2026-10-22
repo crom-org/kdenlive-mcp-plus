@@ -1,9 +1,11 @@
 //! `timeline_add_track`, `timeline_remove_track`, `timeline_add_clip`,
-//! `timeline_list`, `timeline_get_info`.
+//! `timeline_list`, `timeline_get_info`, `timeline_assemble_ranges`.
 
 use serde_json::{Value, json};
 
-use crate::mcp::params::{TimelineAddClipParams, TimelineAddTrackParams, TimelineRemoveTrackParams};
+use crate::mcp::params::{
+    TimelineAddClipParams, TimelineAddTrackParams, TimelineAssembleRangesParams, TimelineRemoveTrackParams,
+};
 use crate::mcp::server::{KdenliveMcpServer, erro};
 use crate::model::document::{self, TrackKind};
 
@@ -148,6 +150,43 @@ impl KdenliveMcpServer {
             .await;
         match resultado {
             Ok(info) => info,
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_assemble_ranges_impl(&self, params: TimelineAssembleRangesParams) -> Value {
+        if params.ranges.is_empty() {
+            return erro("ranges não pode ser vazio".to_string());
+        }
+        let descricao = format!(
+            "montar {} intervalo(s) do produtor \"{}\" na trilha \"{}\"",
+            params.ranges.len(),
+            params.producer_id,
+            params.track_id
+        );
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                let mut posicao = params.position;
+                let mut refs = Vec::with_capacity(params.ranges.len());
+                for [entrada, saida] in &params.ranges {
+                    let indice = document::add_clip_to_track(
+                        &mut session.doc,
+                        &params.track_id,
+                        &params.producer_id,
+                        *entrada,
+                        *saida,
+                        posicao,
+                    )?;
+                    refs.push(format!("{}:{}", params.track_id, indice));
+                    posicao += saida - entrada + 1;
+                }
+                session.mark_modified();
+                Ok(refs)
+            })
+            .await;
+        match resultado {
+            Ok(refs) => json!({ "ok": true, "clip_refs": refs }),
             Err(valor_erro) => valor_erro,
         }
     }

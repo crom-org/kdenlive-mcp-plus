@@ -659,6 +659,95 @@ impl KdenliveMcpServer {
     pub async fn marker_remove(&self, Parameters(params): Parameters<MarkerIdParams>) -> Json<Value> {
         Json(self.marker_remove_impl(params).await)
     }
+
+    // -- Perfil do projeto (Fase 2) -----------------------------------------
+
+    #[tool(
+        description = "Enumerate all available video output profiles (real libmlt profile \
+         names — resolution, frame rate, aspect ratio — verified in this project's own \
+         environment). Takes no parameters."
+    )]
+    pub async fn project_list_profiles(&self) -> Json<Value> {
+        Json(self.project_list_profiles_impl().await)
+    }
+
+    #[tool(
+        description = "Get the current project's video profile (resolution, FPS, aspect ratio, \
+         progressive). Takes no parameters. Returns ok:false if no project is open."
+    )]
+    pub async fn project_get_profile(&self) -> Json<Value> {
+        Json(self.project_get_profile_impl().await)
+    }
+
+    #[tool(
+        description = "Set or update the project's video profile. This only changes the \
+         <profile> metadata; it does not rescale or move any clip already on the timeline. \
+         Parameter: profile (required; call project_list_profiles for valid names)."
+    )]
+    pub async fn project_set_profile(
+        &self,
+        Parameters(params): Parameters<ProjectSetProfileParams>,
+    ) -> Json<Value> {
+        Json(self.project_set_profile_impl(params).await)
+    }
+
+    // -- Bin: pastas, mover, renomear, importar pasta (Fase 2) ---------------
+
+    #[tool(
+        description = "Create a folder in the project bin (this project's own convention for \
+         kdenlive:folder.<parent>.<id> properties, confirmed against the Kdenlive file format \
+         docs). Parameters: name (required), parent_folder_id (optional, for a subfolder). \
+         Returns ok:true with the new folder's id."
+    )]
+    pub async fn bin_create_folder(
+        &self,
+        Parameters(params): Parameters<BinCreateFolderParams>,
+    ) -> Json<Value> {
+        Json(self.bin_create_folder_impl(params).await)
+    }
+
+    #[tool(
+        description = "Move a bin clip into a folder (or back to the root bin if folder_id is \
+         omitted). Parameters: clip_id (required), folder_id (optional)."
+    )]
+    pub async fn bin_move_clip(&self, Parameters(params): Parameters<BinMoveClipParams>) -> Json<Value> {
+        Json(self.bin_move_clip_impl(params).await)
+    }
+
+    #[tool(description = "Rename a bin clip. Parameters: clip_id, name (both required).")]
+    pub async fn bin_rename(&self, Parameters(params): Parameters<BinRenameParams>) -> Json<Value> {
+        Json(self.bin_rename_impl(params).await)
+    }
+
+    #[tool(
+        description = "Import every recognized media file directly inside a folder into the \
+         project bin (not recursive in this phase). Parameter: path (required, folder path). \
+         Returns ok:true with the list of imported clips and a list of any files that failed, \
+         each with its own error — never fails the whole call just because one file could not \
+         be imported."
+    )]
+    pub async fn bin_import_folder(
+        &self,
+        Parameters(params): Parameters<BinImportFolderParams>,
+    ) -> Json<Value> {
+        Json(self.bin_import_folder_impl(params).await)
+    }
+
+    // -- Montagem em lote (Fase 2) -------------------------------------------
+
+    #[tool(
+        description = "Assemble a sequence on a track from several ranges of the same bin clip, \
+         in one call, placed back to back starting at position. Parameters: track_id, \
+         producer_id, ranges (required, a list of [in_frame, out_frame] pairs), position \
+         (required, where the first range starts). Returns ok:true with the list of clip_ref \
+         strings created, in order."
+    )]
+    pub async fn timeline_assemble_ranges(
+        &self,
+        Parameters(params): Parameters<TimelineAssembleRangesParams>,
+    ) -> Json<Value> {
+        Json(self.timeline_assemble_ranges_impl(params).await)
+    }
 }
 
 #[tool_handler]

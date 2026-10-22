@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::mcp::ffprobe;
-use crate::mcp::params::{BinClipColorParams, BinClipIdParams, BinClipNoteParams, BinImportClipParams};
+use crate::mcp::params::{
+    BinClipColorParams, BinClipIdParams, BinClipNoteParams, BinCreateFolderParams, BinImportClipParams,
+    BinImportFolderParams, BinMoveClipParams, BinRenameParams,
+};
 use crate::mcp::server::{KdenliveMcpServer, erro};
 use crate::model::document;
 
@@ -27,19 +30,22 @@ fn clip_json(doc: &xmltree::Element, id: &str) -> Option<Value> {
     }))
 }
 
-impl KdenliveMcpServer {
-    pub(crate) async fn bin_import_clip_impl(&self, params: BinImportClipParams) -> Value {
-        let caminho = PathBuf::from(&params.path);
-        if !caminho.exists() {
-            return erro(format!("arquivo de mídia não encontrado: {}", caminho.display()));
-        }
+/// Extensões de mídia reconhecidas por `bin_import_folder` (não recursivo
+/// nesta fase).
+const EXTENSOES_MIDIA: &[&str] = &[
+    "mp4", "mov", "mkv", "webm", "avi", "mxf", "wav", "mp3", "flac", "ogg", "m4a", "png", "jpg",
+    "jpeg",
+];
 
+impl KdenliveMcpServer {
+    /// Lógica compartilhada por `bin_import_clip` e `bin_import_folder`.
+    async fn importar_um_clipe(&self, caminho: &Path, nome: Option<String>) -> Value {
         let fps = match self.with_session(|s| document::profile_fps(&s.doc)).await {
             Ok(fps) => fps,
             Err(valor_erro) => return valor_erro,
         };
 
-        let quadros = ffprobe::probe_duration_frames(&caminho, fps).await;
+        let quadros = ffprobe::probe_duration_frames(caminho, fps).await;
         let (in_frame, out_frame) = match quadros {
             Some(n) if n > 0 => (0, n - 1),
             _ => (0, 0),
@@ -49,7 +55,7 @@ impl KdenliveMcpServer {
                 .to_string()
         });
 
-        let nome = params.name.clone().unwrap_or_else(|| {
+        let nome = nome.unwrap_or_else(|| {
             caminho
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -78,6 +84,59 @@ impl KdenliveMcpServer {
             }),
             Err(valor_erro) => valor_erro,
         }
+    }
+
+    pub(crate) async fn bin_import_clip_impl(&self, params: BinImportClipParams) -> Value {
+        let caminho = PathBuf::from(&params.path);
+        if !caminho.exists() {
+            return erro(format!("arquivo de mídia não encontrado: {}", caminho.display()));
+        }
+        self.importar_um_clipe(&caminho, params.name.clone()).await
+    }
+
+    pub(crate) async fn bin_import_folder_impl(&self, params: BinImportFolderParams) -> Value {
+        let pasta = PathBuf::from(&params.path);
+        if !pasta.is_dir() {
+            return erro(format!("pasta não encontrada: {}", pasta.display()));
+        }
+
+        let entradas = match std::fs::read_dir(&pasta) {
+            Ok(it) => it,
+            Err(e) => return erro(format!("falha ao ler a pasta {}: {e}", pasta.display())),
+        };
+
+        let mut arquivos: Vec<PathBuf> = entradas
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| EXTENSOES_MIDIA.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+            })
+            .collect();
+        arquivos.sort();
+
+        if arquivos.is_empty() {
+            return erro(format!(
+                "nenhum arquivo de mídia reconhecido em {} (extensões aceitas: {})",
+                pasta.display(),
+                EXTENSOES_MIDIA.join(", ")
+            ));
+        }
+
+        let mut importados = Vec::with_capacity(arquivos.len());
+        let mut falhas = Vec::new();
+        for arquivo in arquivos {
+            let resultado = self.importar_um_clipe(&arquivo, None).await;
+            if resultado["ok"] == json!(true) {
+                importados.push(resultado);
+            } else {
+                falhas.push(json!({ "arquivo": arquivo.display().to_string(), "erro": resultado["erro"] }));
+            }
+        }
+
+        json!({ "ok": true, "importados": importados, "falhas": falhas })
     }
 
     pub(crate) async fn bin_list_clips_impl(&self) -> Value {
@@ -153,6 +212,54 @@ impl KdenliveMcpServer {
             .await;
         match resultado {
             Ok(()) => json!({ "ok": true, "clip_id": params.clip_id, "nota": params.note }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn bin_create_folder_impl(&self, params: BinCreateFolderParams) -> Value {
+        let descricao = format!("criar pasta \"{}\" na bin", params.name);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                let id = document::create_bin_folder(&mut session.doc, params.parent_folder_id.as_deref(), &params.name)?;
+                session.mark_modified();
+                Ok(id)
+            })
+            .await;
+        match resultado {
+            Ok(folder_id) => json!({ "ok": true, "folder_id": folder_id, "name": params.name }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn bin_move_clip_impl(&self, params: BinMoveClipParams) -> Value {
+        let descricao = format!("mover clipe \"{}\" na bin", params.clip_id);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                document::bin_move_clip(&mut session.doc, &params.clip_id, params.folder_id.as_deref())?;
+                session.mark_modified();
+                Ok(())
+            })
+            .await;
+        match resultado {
+            Ok(()) => json!({ "ok": true, "clip_id": params.clip_id, "folder_id": params.folder_id }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn bin_rename_impl(&self, params: BinRenameParams) -> Value {
+        let descricao = format!("renomear clipe \"{}\" para \"{}\"", params.clip_id, params.name);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                document::bin_clip_rename(&mut session.doc, &params.clip_id, &params.name)?;
+                session.mark_modified();
+                Ok(())
+            })
+            .await;
+        match resultado {
+            Ok(()) => json!({ "ok": true, "clip_id": params.clip_id, "name": params.name }),
             Err(valor_erro) => valor_erro,
         }
     }

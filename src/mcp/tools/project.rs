@@ -1,13 +1,15 @@
 //! `project_new`, `project_open`/`project_import_kdenlive`, `project_save`,
-//! `project_get_info`, `project_validate`.
+//! `project_get_info`, `project_validate`, `project_list_profiles`,
+//! `project_get_profile`, `project_set_profile`.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::mcp::params::{ProjectNewParams, ProjectOpenParams, ProjectSaveParams};
+use crate::mcp::params::{ProjectNewParams, ProjectOpenParams, ProjectSaveParams, ProjectSetProfileParams};
 use crate::mcp::server::{KdenliveMcpServer, erro};
 use crate::model::document;
+use crate::model::profile;
 use crate::model::Session;
 
 /// Resumo do perfil de vídeo de um documento, como JSON.
@@ -88,6 +90,37 @@ impl KdenliveMcpServer {
             .await;
         match problemas {
             Ok(lista) => json!({ "ok": true, "problemas": lista, "sem_problemas": lista_is_empty(&lista) }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn project_list_profiles_impl(&self) -> Value {
+        let perfis: Vec<Value> = profile::PROFILES
+            .iter()
+            .map(|p| json!({ "name": p.name, "description": p.description, "summary": p.summary() }))
+            .collect();
+        json!({ "ok": true, "perfis": perfis })
+    }
+
+    pub(crate) async fn project_get_profile_impl(&self) -> Value {
+        match self.with_session(|session| resumo_perfil(&session.doc)).await {
+            Ok(perfil) => json!({ "ok": true, "perfil": perfil }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn project_set_profile_impl(&self, params: ProjectSetProfileParams) -> Value {
+        let descricao = format!("trocar o perfil do projeto para \"{}\"", params.profile);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                document::set_profile(&mut session.doc, &params.profile)?;
+                session.mark_modified();
+                Ok(())
+            })
+            .await;
+        match resultado {
+            Ok(()) => json!({ "ok": true, "profile": params.profile }),
             Err(valor_erro) => valor_erro,
         }
     }

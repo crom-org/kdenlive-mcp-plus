@@ -274,3 +274,52 @@ pub struct MarkerAddParams {
 pub struct MarkerIdParams {
     pub marker_id: String,
 }
+
+// -- Perfil do projeto --------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ProjectSetProfileParams {
+    /// Nome do perfil (ver project_list_profiles).
+    pub profile: String,
+}
+
+// -- Bin: pastas, mover, renomear, importar pasta ----------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BinCreateFolderParams {
+    pub name: String,
+    /// Id da pasta-pai, se esta for uma subpasta. Omitido = pasta na raiz.
+    pub parent_folder_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BinMoveClipParams {
+    pub clip_id: String,
+    /// Id da pasta de destino. Omitido move o clipe para a raiz da bin.
+    pub folder_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BinRenameParams {
+    pub clip_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BinImportFolderParams {
+    /// Caminho da pasta cujos arquivos de mídia serão importados (não
+    /// recursivo nesta fase).
+    pub path: String,
+}
+
+// -- Montagem em lote ---------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TimelineAssembleRangesParams {
+    pub track_id: String,
+    pub producer_id: String,
+    /// Intervalos `[in, out]` do produtor, montados em sequência na
+    /// trilha, um atrás do outro, a partir de `position`.
+    pub ranges: Vec<[i64; 2]>,
+    pub position: i64,
+}

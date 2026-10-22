@@ -109,6 +109,25 @@ pub fn profile_fps(root: &Element) -> f64 {
     if den == 0.0 { num } else { num / den }
 }
 
+/// Troca o perfil de vídeo do projeto por um perfil nomeado válido (ver
+/// `model::profile`). Só altera os atributos do elemento `<profile>` —
+/// não recalcula nenhuma posição/duração já gravada na timeline.
+pub fn set_profile(root: &mut Element, profile_name: &str) -> Result<(), ModelError> {
+    let definicao = profile::find(profile_name).ok_or_else(|| {
+        ModelError::Invalid(format!(
+            "perfil desconhecido: \"{profile_name}\". Use project_list_profiles para ver os \
+             perfis válidos."
+        ))
+    })?;
+    let elemento = profile_element_mut(root)
+        .ok_or_else(|| ModelError::NotFound("elemento <profile> não encontrado".to_string()))?;
+    elemento.attributes.clear();
+    for (chave, valor) in definicao.to_xml_attrs() {
+        elemento.attributes.insert(chave, valor);
+    }
+    Ok(())
+}
+
 fn attr_eq(el: &Element, tag: &str, attr: &str, value: &str) -> bool {
     el.name == tag && el.attributes.get(attr).map(String::as_str) == Some(value)
 }
@@ -330,6 +349,72 @@ pub fn bin_clip_set_note(root: &mut Element, producer_id: &str, note: &str) -> R
         .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado na bin: {producer_id}")))?;
     set_property(producer, "kdenlive-mcp-plus:note", note);
     Ok(())
+}
+
+/// Renomeia um clipe da bin (propriedade `kdenlive:clipname`, confirmada
+/// no `dev-docs/fileformat.md` do Kdenlive).
+pub fn bin_clip_rename(root: &mut Element, producer_id: &str, nome: &str) -> Result<(), ModelError> {
+    let producer = find_producer_mut(root, producer_id)
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado na bin: {producer_id}")))?;
+    set_property(producer, "kdenlive:clipname", nome);
+    Ok(())
+}
+
+/// Move um clipe da bin para dentro de uma pasta (ou para a raiz, se
+/// `folder_id` for `None`) — propriedade `kdenlive:folderid`, confirmada
+/// no `dev-docs/fileformat.md` do Kdenlive.
+pub fn bin_move_clip(root: &mut Element, producer_id: &str, folder_id: Option<&str>) -> Result<(), ModelError> {
+    let producer = find_producer_mut(root, producer_id)
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado na bin: {producer_id}")))?;
+    match folder_id {
+        Some(id) => set_property(producer, "kdenlive:folderid", id),
+        None => remove_property(producer, "kdenlive:folderid"),
+    }
+    Ok(())
+}
+
+/// Cria uma pasta na bin. Convenção confirmada no `dev-docs/fileformat.md`
+/// do Kdenlive: uma propriedade `kdenlive:folder.<id do pai>.<id da nova
+/// pasta>` = nome, na playlist `main_bin` (`-1` como pai = raiz). Devolve o
+/// id da pasta criada.
+pub fn create_bin_folder(root: &mut Element, parent_id: Option<&str>, nome: &str) -> Result<String, ModelError> {
+    let bin = main_bin_mut(root)
+        .ok_or_else(|| ModelError::NotFound(format!("playlist \"{MAIN_BIN_ID}\" não encontrada")))?;
+
+    let mut max_n: i64 = -1;
+    for prop in bin.children.iter().filter_map(XMLNode::as_element).filter(|e| e.name == "property") {
+        if let Some(id) = prop.attributes.get("name")
+            && let Some(resto) = id.strip_prefix("kdenlive:folder.")
+            && let Some((_, folder_n)) = resto.rsplit_once('.')
+            && let Ok(num) = folder_n.parse::<i64>()
+        {
+            max_n = max_n.max(num);
+        }
+    }
+    let folder_id = (max_n + 1).to_string();
+
+    let prop_name = format!("kdenlive:folder.{}.{folder_id}", parent_id.unwrap_or("-1"));
+    set_property(bin, &prop_name, nome);
+    Ok(folder_id)
+}
+
+/// `(id do pai, id da pasta, nome)` de cada pasta da bin.
+pub fn list_bin_folders(root: &Element) -> Vec<(String, String, String)> {
+    let Some(bin) = main_bin(root) else {
+        return Vec::new();
+    };
+    bin.children
+        .iter()
+        .filter_map(XMLNode::as_element)
+        .filter(|e| e.name == "property")
+        .filter_map(|e| {
+            let nome_prop = e.attributes.get("name")?;
+            let resto = nome_prop.strip_prefix("kdenlive:folder.")?;
+            let (pai, filho) = resto.rsplit_once('.')?;
+            let texto = e.get_text()?.into_owned();
+            Some((pai.to_string(), filho.to_string(), texto))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,6 +1468,54 @@ mod tests {
 
         remove_marker(&mut doc, &id_timeline).expect("remove");
         assert_eq!(list_markers(&doc).len(), 1);
+    }
+
+    #[test]
+    fn pastas_da_bin_e_mover_clipe_entre_elas() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let producer_id = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a.mp4", 0, 9).expect("importa");
+
+        assert!(list_bin_folders(&doc).is_empty());
+        let raiz = create_bin_folder(&mut doc, None, "Vídeos").expect("cria pasta raiz");
+        let sub = create_bin_folder(&mut doc, Some(&raiz), "Brutos").expect("cria subpasta");
+
+        let pastas = list_bin_folders(&doc);
+        assert_eq!(pastas.len(), 2);
+        assert!(pastas.iter().any(|(pai, id, nome)| pai == "-1" && id == &raiz && nome == "Vídeos"));
+        assert!(pastas.iter().any(|(pai, id, nome)| pai == &raiz && id == &sub && nome == "Brutos"));
+
+        bin_move_clip(&mut doc, &producer_id, Some(&sub)).expect("move o clipe");
+        assert_eq!(
+            get_property(find_producer(&doc, &producer_id).unwrap(), "kdenlive:folderid"),
+            Some(sub)
+        );
+
+        bin_move_clip(&mut doc, &producer_id, None).expect("move de volta pra raiz");
+        assert_eq!(get_property(find_producer(&doc, &producer_id).unwrap(), "kdenlive:folderid"), None);
+    }
+
+    #[test]
+    fn renomear_clipe_da_bin() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let producer_id = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a.mp4", 0, 9).expect("importa");
+        bin_clip_rename(&mut doc, &producer_id, "novo nome").expect("renomeia");
+        assert_eq!(
+            get_property(find_producer(&doc, &producer_id).unwrap(), "kdenlive:clipname"),
+            Some("novo nome".to_string())
+        );
+    }
+
+    #[test]
+    fn trocar_perfil_do_projeto() {
+        let mut doc = new_document("atsc_720p_25").expect("perfil válido");
+        assert_eq!(profile_element(&doc).unwrap().attributes.get("width"), Some(&"1280".to_string()));
+
+        set_profile(&mut doc, "uhd_2160p_30").expect("troca pra 4k");
+        assert_eq!(profile_element(&doc).unwrap().attributes.get("width"), Some(&"3840".to_string()));
+        assert_eq!(profile_element(&doc).unwrap().attributes.get("height"), Some(&"2160".to_string()));
+
+        let erro = set_profile(&mut doc, "perfil-que-nao-existe").expect_err("deveria falhar");
+        assert!(matches!(erro, ModelError::Invalid(_)));
     }
 
     #[test]

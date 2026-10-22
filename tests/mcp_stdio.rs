@@ -83,10 +83,14 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
     assert_eq!(
         nomes,
         vec![
+            "bin_create_folder",
             "bin_get_clip_details",
             "bin_import_clip",
+            "bin_import_folder",
             "bin_list_clips",
+            "bin_move_clip",
             "bin_remove_clip",
+            "bin_rename",
             "clip_add_note",
             "clip_get_properties",
             "clip_reverse",
@@ -111,10 +115,13 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "marker_remove",
             "preview_frame",
             "project_get_info",
+            "project_get_profile",
             "project_import_kdenlive",
+            "project_list_profiles",
             "project_new",
             "project_open",
             "project_save",
+            "project_set_profile",
             "project_validate",
             "render_cancel",
             "render_progress",
@@ -125,6 +132,7 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "session_undo",
             "timeline_add_clip",
             "timeline_add_track",
+            "timeline_assemble_ranges",
             "timeline_get_info",
             "timeline_list",
             "timeline_remove_track",
@@ -772,5 +780,129 @@ async fn fase2_trilha_clipe_sessao_filtros_transicoes_guias_marcadores() {
     );
 
     let _ = std::fs::remove_file(&midia);
+    client.cancel().await.expect("fechamento limpo do cliente");
+}
+
+/// Exercita perfis de projeto, pastas/mover/renomear da bin, importar uma
+/// pasta inteira e montagem em lote por intervalos — Fase 2, grupo 4.
+#[tokio::test]
+async fn fase2_perfis_pastas_da_bin_importar_pasta_e_montagem_em_lote() {
+    let client = iniciar_cliente().await;
+
+    let perfis = chamar(&client, "project_list_profiles", serde_json::json!({})).await;
+    assert_ok(&perfis, "project_list_profiles");
+    assert!(
+        perfis["perfis"].as_array().is_some_and(|p| p.iter().any(|x| x["name"] == "atsc_720p_25")),
+        "esperava \"atsc_720p_25\" na lista de perfis: {perfis}"
+    );
+
+    chamar(&client, "project_new", serde_json::json!({ "profile": "atsc_720p_25" })).await;
+    let perfil_atual = chamar(&client, "project_get_profile", serde_json::json!({})).await;
+    assert_ok(&perfil_atual, "project_get_profile");
+    assert_eq!(perfil_atual["perfil"]["largura"], Value::from(1280));
+
+    let trocado = chamar(
+        &client,
+        "project_set_profile",
+        serde_json::json!({ "profile": "uhd_2160p_30" }),
+    )
+    .await;
+    assert_ok(&trocado, "project_set_profile");
+    let perfil_novo = chamar(&client, "project_get_profile", serde_json::json!({})).await;
+    assert_eq!(perfil_novo["perfil"]["largura"], Value::from(3840));
+
+    // --- pastas da bin, mover e renomear ---------------------------------
+    let pasta_raiz = chamar(
+        &client,
+        "bin_create_folder",
+        serde_json::json!({ "name": "Brutos" }),
+    )
+    .await;
+    assert_ok(&pasta_raiz, "bin_create_folder");
+    let folder_id = pasta_raiz["folder_id"].as_str().unwrap().to_string();
+
+    let midia = caminho_temporario("fase2_grupo4_midia.mp4");
+    let _ = std::fs::remove_file(&midia);
+    chamar(
+        &client,
+        "export_render",
+        serde_json::json!({
+            "project_path": caminho_fixture().to_string_lossy(),
+            "output_path": midia.to_string_lossy(),
+            "preset": "h264_hq",
+            "overwrite": true,
+        }),
+    )
+    .await;
+    let importado = chamar(&client, "bin_import_clip", serde_json::json!({ "path": midia.to_string_lossy() })).await;
+    let clip_id = importado["clip_id"].as_str().unwrap().to_string();
+
+    let movido = chamar(
+        &client,
+        "bin_move_clip",
+        serde_json::json!({ "clip_id": clip_id, "folder_id": folder_id }),
+    )
+    .await;
+    assert_ok(&movido, "bin_move_clip");
+
+    let renomeado = chamar(
+        &client,
+        "bin_rename",
+        serde_json::json!({ "clip_id": clip_id, "name": "clipe renomeado" }),
+    )
+    .await;
+    assert_ok(&renomeado, "bin_rename");
+    let detalhes = chamar(&client, "bin_get_clip_details", serde_json::json!({ "clip_id": clip_id })).await;
+    assert_eq!(detalhes["nome"], Value::from("clipe renomeado"));
+
+    // --- importar uma pasta inteira ---------------------------------------
+    let pasta_midia = std::env::temp_dir().join(format!("kdenlive_mcp_plus_pasta_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&pasta_midia);
+    std::fs::create_dir_all(&pasta_midia).expect("cria pasta de mídia de teste");
+    std::fs::copy(&midia, pasta_midia.join("copia1.mp4")).expect("copia mídia 1");
+    std::fs::copy(&midia, pasta_midia.join("copia2.mp4")).expect("copia mídia 2");
+    std::fs::write(pasta_midia.join("nao_e_midia.txt"), b"ignorar").expect("cria arquivo não-mídia");
+
+    let pasta_importada = chamar(
+        &client,
+        "bin_import_folder",
+        serde_json::json!({ "path": pasta_midia.to_string_lossy() }),
+    )
+    .await;
+    assert_ok(&pasta_importada, "bin_import_folder");
+    assert_eq!(
+        pasta_importada["importados"].as_array().map(Vec::len),
+        Some(2),
+        "deveria ter importado só os 2 arquivos de mídia, ignorando o .txt: {pasta_importada}"
+    );
+
+    // --- montagem em lote por intervalos -----------------------------------
+    let trilha = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "video" })).await;
+    let track_id = trilha["track_id"].as_str().unwrap().to_string();
+
+    let montagem = chamar(
+        &client,
+        "timeline_assemble_ranges",
+        serde_json::json!({
+            "track_id": track_id,
+            "producer_id": clip_id,
+            "ranges": [[0, 9], [20, 29], [40, 44]],
+            "position": 0,
+        }),
+    )
+    .await;
+    assert_ok(&montagem, "timeline_assemble_ranges");
+    let refs = montagem["clip_refs"].as_array().expect("deveria ter clip_refs");
+    assert_eq!(refs.len(), 3);
+    assert_eq!(refs[0], Value::from(format!("{track_id}:0")));
+    assert_eq!(refs[1], Value::from(format!("{track_id}:1")));
+    assert_eq!(refs[2], Value::from(format!("{track_id}:2")));
+
+    let info = chamar(&client, "timeline_get_info", serde_json::json!({})).await;
+    // 10 + 10 + 5 quadros = 25
+    assert_eq!(info["duracao_quadros"], Value::from(25));
+
+    let _ = std::fs::remove_file(&midia);
+    let _ = std::fs::remove_dir_all(&pasta_midia);
     client.cancel().await.expect("fechamento limpo do cliente");
 }
