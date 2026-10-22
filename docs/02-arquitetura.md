@@ -58,9 +58,22 @@ Estrutura MLT básica (confirmada rodando `melt` neste ambiente, ver `tests/fixt
 
 Ainda não implementado nesta fase, mas o vocabulário já é fixado pelo próprio formato MLT: **projeto** (o XML inteiro) → **perfil** (resolução/fps/aspecto) → **bin** (coleção de mídia importada, ainda não mapeada no MLT nesta fase — ver [10-glossario.md](10-glossario.md)) → **trilhas** (`track`, dentro do `tractor`) → **clipes** (entradas de uma `playlist`, com `in`/`out`) → **filtros** (efeitos anexados a um clipe ou trilha) → **transições** (entre duas camadas de trilha) → **guias/marcadores** (pontos no tempo, ver a nota de unificação em [04-ferramentas.md](04-ferramentas.md)).
 
-## Undo/redo por snapshot (Fase 1+, não implementado)
+## Camada de modelo (Fase 2)
 
-O briefing original pede undo/redo por snapshot (histórico de até 50 estados). Nesta fase, como não há edição nenhuma implementada (só render de um projeto já existente), não há histórico a desfazer. Quando a Fase 1 implementar as primeiras ferramentas de edição, a abordagem planejada é: cada operação de edição salva uma cópia do XML atual antes de aplicar a mudança, e `session_undo`/`session_redo` (unificados com `session_undo_step`/`session_redo_step`, ver [04-ferramentas.md](04-ferramentas.md)) navegam essa pilha de snapshots.
+A Fase 2 implementou praticamente todo o catálogo de edição por cima de uma camada de modelo própria, em `src/model/`:
+
+- **`model::document`**: funções que leem/constroem/modificam um documento MLT XML em memória, representado como um DOM mutável (`xmltree::Element`, crate `xmltree`) — não um modelo tipado próprio nem objetos libmlt vivos via FFI (decisão D-022 em [decisoes.md](decisoes.md)). Essa escolha preserva o isolamento da decisão D-003: editar um projeto nunca chama o libmlt; só `render`/`preview_frame` (processos filho isolados) tocam o motor.
+- **Convenções próprias deste módulo** (nenhuma é um conceito do MLT nem do Kdenlive, são só como este servidor organiza as coisas):
+  - **Referência de clipe**: a string `"<track_id>:<índice>"` (decisão D-023) — localiza um clipe de volta depois de listado, já que o MLT não dá id estável a entradas de playlist.
+  - Inserção de clipe na timeline (`timeline_add_clip`/`move_clip`/`split_clip`) aceita qualquer posição: no fim da trilha (cria um `<blank>` de preenchimento), exatamente no início de um clipe existente (empurra esse clipe e os seguintes para depois, usando a posição implícita do MLT) ou dentro de um `<blank>` (divide o blank em dois). Posição estritamente dentro de um `<entry>` já ocupado continua erro — sem "ripple" parcial.
+- **`model::session::Session`**: o documento atual + histórico de undo/redo por snapshot (até 50 entradas) + contadores de id monotônicos (nunca reaproveitam um id removido na mesma sessão) + `playhead`/`zoom` (posição do cursor e nível de zoom da timeline — conceitos só de UI/sessão, sem efeito no render, já que não há player nesta fase headless).
+- **`model::srt`**: leitura/escrita do formato público SRT (não uma convenção do Kdenlive), usado por `subtitle_import_srt`/`export_srt`.
+- **Produtores e filtros do MLT usados pela edição** (todos confirmados via `melt -query` e renderização real, nunca inventados): produtor `timewarp` (velocidade/reversão de clipe, D-027), produtor `pango` (títulos, D-032, em vez do formato interno `kdenlivetitle` do Kdenlive, cujo esquema não foi confirmado), filtros `brightness` (opacidade), `qtblend` (posição/escala/rotação) e `volume` (nível/normalização de áudio) — todos anexados como `<filter>` filho do `<entry>` da timeline, não do `<producer>` compartilhado (confirmado que isso dá um efeito por corte, independente de outros usos do mesmo produtor — decisão D-028). Transições (`<transition>`) ficam no tractor principal, com índices numéricos de trilha.
+- **Fila/jobs de render**: `engine::jobs::JobRegistry` (jobs assíncronos avulsos de `export_render(wait=false)`, com status `Queued`/`Running`/`Done`/`Failed`/`Cancelled`) e `engine::queue::RenderQueue` (construída por cima do mesmo registro e do mesmo `render_lock` compartilhado — não é um mecanismo paralelo). `render_cancel`/`render_queue_stop` encerram de verdade o processo filho em andamento (sinal real), diferente do bug equivalente do projeto original.
+
+## Undo/redo por snapshot
+
+Implementado na Fase 2 (ver `model::session::Session`, acima). Cada ferramenta de edição chama `snapshot_before` antes de mutar o documento; `session_undo`/`session_redo` (unificados com `session_undo_step`/`session_redo_step` do catálogo original, que não existem mais como ferramentas separadas — ver [04-ferramentas.md](04-ferramentas.md)) navegam essa pilha de snapshots, com um parâmetro `steps`.
 
 ## Erros
 
@@ -74,4 +87,4 @@ Logs deste processo (os poucos que existem nesta fase: erros do CLI) vão para s
 
 ## Decisões de design referenciadas aqui
 
-D-001 (Rust), D-002 (libmlt via FFI), D-003 (render em processo separado), D-004 (MLT XML nativo), D-005 (presets explícitos), D-006 (sem fork do Kdenlive nesta fase) — ver [decisoes.md](decisoes.md) para o motivo e as alternativas avaliadas de cada uma.
+D-001 (Rust), D-002 (libmlt via FFI), D-003 (render em processo separado), D-004 (MLT XML nativo), D-005 (presets explícitos), D-006 (sem fork do Kdenlive nesta fase), D-022 a D-036 (modelo em memória, convenções de referência de clipe/bin/guias/marcadores, produtores e filtros do MLT usados pela edição, fila de render) — ver [decisoes.md](decisoes.md) para o motivo e as alternativas avaliadas de cada uma.

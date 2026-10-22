@@ -31,15 +31,19 @@ Duas observações importantes sobre essa lista:
 
 **Dependência:** nenhuma ferramenta desta fase depende de código fora do motor libmlt já construído na Fase 0.
 
-## Fase 2 — edição completa
+## Fase 2 — edição completa (concluída nesta execução)
 
-As demais ferramentas herdadas do projeto de referência, mais as ferramentas novas marcadas como fase 2 — títulos, keyframes, legendas, áudio (níveis, normalização), transformação de clipe, miniaturas, montagem em lote por intervalos e importação de pasta inteira para a bin. A lista completa, com origem e status de cada uma, está em [docs/04-ferramentas.md](04-ferramentas.md).
+**Entregue nesta execução:** praticamente todo o catálogo de edição. Das 73 ferramentas herdadas do projeto de referência, 70 foram implementadas e testadas — as 3 que faltam não desapareceram por omissão: `project_get_render_profiles` foi removida (alias enganoso de `project_list_profiles`, ver [04-ferramentas.md](04-ferramentas.md)), e `session_undo_step`/`session_redo_step` foram unificadas em `session_undo`/`session_redo` com um parâmetro `steps`. Das 20 ferramentas novas propostas, 18 foram implementadas; as 2 que faltam (`clip_reframe_vertical`, `audio_duck`) ficam `planejada`, com o motivo registrado na decisão D-034 de [decisoes.md](decisoes.md) — a primeira exigiria calcular geometria de corte/zoom sem poder verificar visualmente o resultado neste ambiente sem tela; a segunda depende de plugins LADSPA, indisponíveis aqui.
 
-**Critério de saída:** toda a tabela de [docs/04-ferramentas.md](04-ferramentas.md) com origem "herdada" ou fase ≤ 2 está com status `testada`.
+Isso dá 89 ferramentas MCP no total (contando `server_info`, fora dos dois catálogos), com 58 testes automatizados (39 unitários + 19 de integração via protocolo MCP real).
 
-**Risco:** volume grande de ferramentas de uma vez. Recomenda-se dividir em sub-lotes por categoria (bin, timeline, filtros, transições, guias/marcadores, fila de render, etc.), em vez de tentar entregar tudo de uma só implementação.
+**Critério de saída:** atingido — toda a tabela de [docs/04-ferramentas.md](04-ferramentas.md) com origem "herdada" ou fase ≤ 2 está com status `testada`, exceto as duas exceções documentadas acima.
+
+**Risco que se confirmou, mas foi absorvido:** o volume grande de ferramentas de fato exigiu dividir o trabalho em sub-lotes por categoria (trilha/clipe/sessão, filtros/transições, guias/marcadores, bin/perfis/lote, timeline, fila de render, títulos/keyframes/legendas/áudio/transformação/miniatura) — exatamente a mitigação já prevista aqui, e cada sub-lote foi comitado separadamente.
 
 ## Fase 3 — integração com o Kdenlive aberto
+
+As Fases 0 a 2 estão concluídas e o motor está estável (89 ferramentas, 58 testes passando), satisfazendo a condição que a decisão D-006 colocava para só então começar esta fase. Isso não resolve, porém, as duas coisas que a Fase 3 depende do responsável pelo projeto decidir: a escolha entre fork em C++/Qt e D-Bus (abaixo), e o fato de este ambiente não ter tela para compilar/validar nada de interface gráfica — ver a nota em [docs/09-riscos-e-bugs.md](09-riscos-e-bugs.md).
 
 Painéis extras e controle do Kdenlive já aberto pelo usuário, para permitir revisão em tempo real do que o agente está fazendo. Depende de uma escolha entre fazer fork do Kdenlive em C++/Qt ou controlar o Kdenlive por D-Bus (como faz o projeto de referência `mcp-kdenlive`, que usa um fork com patch próprio mais D-Bus — ver [docs/03-concorrentes.md](03-concorrentes.md)).
 

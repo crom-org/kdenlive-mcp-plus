@@ -14,10 +14,10 @@ Se você está chegando agora, leia nesta ordem:
 
 | Fase | Status |
 |---|---|
-| Fase 0 — base, motor e servidor mínimo | Concluída nesta execução |
-| Fase 1 — base operacional | Planejada |
-| Fase 2 — edição completa | Planejada |
-| Fase 3 — integração com o Kdenlive aberto | Planejada |
+| Fase 0 — base, motor e servidor mínimo | Concluída |
+| Fase 1 — base operacional | Concluída |
+| Fase 2 — edição completa | Concluída (exceto `clip_reframe_vertical` e `audio_duck`, ver docs/04-ferramentas.md) |
+| Fase 3 — integração com o Kdenlive aberto | Planejada — decisão de fork vs. D-Bus pendente do responsável pelo projeto |
 
 Ver [05-roadmap.md](05-roadmap.md) para os critérios de saída de cada fase.
 
