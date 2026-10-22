@@ -99,6 +99,15 @@ pub fn profile_element_mut(root: &mut Element) -> Option<&mut Element> {
     root.get_mut_child("profile")
 }
 
+/// Taxa de quadros do perfil do documento (25 fps se o perfil não puder ser
+/// lido — nunca deveria acontecer num documento criado por este projeto).
+pub fn profile_fps(root: &Element) -> f64 {
+    let Some(p) = profile_element(root) else { return 25.0 };
+    let num: f64 = p.attributes.get("frame_rate_num").and_then(|v| v.parse().ok()).unwrap_or(25.0);
+    let den: f64 = p.attributes.get("frame_rate_den").and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    if den == 0.0 { num } else { num / den }
+}
+
 fn attr_eq(el: &Element, tag: &str, attr: &str, value: &str) -> bool {
     el.name == tag && el.attributes.get(attr).map(String::as_str) == Some(value)
 }

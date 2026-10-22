@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+libc = "0.2.191"
 rmcp = { version = "3.6.0", default-features = false, features = ["macros", "server", "transport-io"] }
 schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }

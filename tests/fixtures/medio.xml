@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" version="7.22.0" root="/home/j/Documentos/GitHub/crom-kdenlive-mcp/kdenlive-mcp-plus" title="color:0x224466ff">
+  <profile description="HD 720p 25 fps" width="1280" height="720" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="16" display_aspect_den="9" frame_rate_num="25" frame_rate_den="1" colorspace="709"/>
+  <producer id="producer0" in="0" out="249">
+    <property name="length">15000</property>
+    <property name="eof">pause</property>
+    <property name="resource">0x224466ff</property>
+    <property name="aspect_ratio">1</property>
+    <property name="mlt_service">color</property>
+  </producer>
+  <playlist id="playlist0">
+    <entry producer="producer0" in="0" out="249"/>
+  </playlist>
+  <producer id="producer1" in="0" out="249">
+    <property name="length">15000</property>
+    <property name="eof">pause</property>
+    <property name="resource">&lt;producer&gt;</property>
+    <property name="aspect_ratio">1</property>
+    <property name="frequency">300</property>
+    <property name="phase">0</property>
+    <property name="level">-12</property>
+    <property name="mlt_service">tone</property>
+  </producer>
+  <playlist id="playlist1">
+    <entry producer="producer1" in="0" out="249"/>
+  </playlist>
+  <tractor id="tractor0" title="color:0x224466ff" in="0" out="249">
+    <track producer="playlist0"/>
+    <track producer="playlist1" hide="video"/>
+  </tractor>
+</mlt>

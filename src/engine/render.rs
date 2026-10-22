@@ -69,10 +69,66 @@ pub fn render(project: &Path, output: &Path, opts: &RenderOptions) -> Result<(),
         return Err(EngineError::Create("perfil de vídeo (profile)"));
     }
 
-    let resultado = render_com_perfil(profile, &project_c, &output_c, opts);
+    let resultado = render_com_perfil(profile, &project_c, &output_c, opts, None);
 
     // SAFETY: `profile` não é nulo (checado acima) e não é mais usado depois
     // deste ponto, em nenhum dos caminhos de `render_com_perfil`.
+    unsafe {
+        ffi::mlt_profile_close(profile);
+    }
+
+    resultado?;
+
+    let metadata = std::fs::metadata(output).map_err(|_| EngineError::OutputMissing(output.to_path_buf()))?;
+    if metadata.len() == 0 {
+        return Err(EngineError::OutputMissing(output.to_path_buf()));
+    }
+
+    Ok(())
+}
+
+/// Renderiza um único quadro de `project` como um PNG em `output` (usada
+/// pela ferramenta `preview_frame`). `frame` é 0-based, na taxa de quadros
+/// do perfil do projeto.
+pub fn render_frame(project: &Path, output: &Path, frame: i64, overwrite: bool) -> Result<(), EngineError> {
+    if !project.exists() {
+        return Err(EngineError::ProjectNotFound(project.to_path_buf()));
+    }
+    if output.exists() && !overwrite {
+        return Err(EngineError::OutputExists(output.to_path_buf()));
+    }
+    if frame < 0 {
+        return Err(EngineError::InvalidText(format!(
+            "o número do quadro não pode ser negativo: {frame}"
+        )));
+    }
+
+    let project_c = path_to_cstring(project, "projeto")?;
+    let output_c = path_to_cstring(output, "saída")?;
+
+    let opts = crate::engine::preset::RenderOptions {
+        vcodec: Some("png"),
+        acodec: None,
+        vbitrate: None,
+        abitrate: None,
+        extension: "png",
+        disable_audio: true,
+        disable_video: false,
+        overwrite,
+    };
+
+    let _guard = RENDER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    ensure_factory_initialized();
+
+    // SAFETY: ver a função `render`, acima — mesma garantia.
+    let profile = unsafe { ffi::mlt_profile_init(std::ptr::null()) };
+    if profile.is_null() {
+        return Err(EngineError::Create("perfil de vídeo (profile)"));
+    }
+
+    let resultado = render_com_perfil(profile, &project_c, &output_c, &opts, Some(frame));
+
+    // SAFETY: ver a função `render`, acima — mesma garantia.
     unsafe {
         ffi::mlt_profile_close(profile);
     }
@@ -92,6 +148,7 @@ fn render_com_perfil(
     project_c: &CString,
     output_c: &CString,
     opts: &RenderOptions,
+    only_frame: Option<i64>,
 ) -> Result<(), EngineError> {
     // SAFETY: `profile` é válido (verificado pelo chamador). "xml" é o nome
     // do serviço de produtor registrado pelo libmlt para ler projetos MLT.
@@ -103,6 +160,22 @@ fn render_com_perfil(
         return Err(EngineError::Create(
             "produtor (producer) a partir do XML do projeto",
         ));
+    }
+
+    if let Some(frame) = only_frame {
+        // SAFETY: `producer` não é nulo (checado acima); `frame` já foi
+        // validado como não-negativo pelo chamador (`render_frame`).
+        // `mlt_position` é `int32_t` nesta build do libmlt (ver
+        // mlt_types.h); o `as i32` é uma conversão estreita, não uma
+        // reinterpretação de bits.
+        let rc = unsafe { ffi::mlt_producer_set_in_and_out(producer, frame as i32, frame as i32) };
+        if rc != 0 {
+            // SAFETY: `producer` não é nulo neste ponto.
+            unsafe { ffi::mlt_producer_close(producer) };
+            return Err(EngineError::InvalidText(format!(
+                "não consegui selecionar o quadro {frame} (fora do intervalo do projeto?)"
+            )));
+        }
     }
 
     // SAFETY: `profile` é válido. "avformat" é o nome do serviço de

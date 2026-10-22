@@ -1,6 +1,9 @@
 //! Servidor MCP em transporte stdio.
 
+mod ffprobe;
+mod params;
 pub mod server;
+mod tools;
 
 pub use server::KdenliveMcpServer;
 

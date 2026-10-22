@@ -8,10 +8,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USO: &str = "uso: kdenlive-mcp-plus <mcp|render|--version>\n\
+const USO: &str = "uso: kdenlive-mcp-plus <mcp|render|frame|--version>\n\
      \n\
      \x20 mcp                                                    inicia o servidor MCP via stdio\n\
      \x20 render <projeto> <saida> [--preset NOME] [--overwrite]  renderiza direto, sem MCP\n\
+     \x20 frame <projeto> <saida.png> <quadro> [--overwrite]      renderiza um quadro único (preview_frame)\n\
      \x20 --version                                               mostra nome e versão";
 
 fn main() -> ExitCode {
@@ -29,6 +30,7 @@ fn executar(args: &[String]) -> Result<(), String> {
     match args.get(1).map(String::as_str) {
         Some("mcp") => executar_mcp(),
         Some("render") => executar_render(&args[2..]),
+        Some("frame") => executar_frame(&args[2..]),
         Some("--version") => {
             println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -84,4 +86,34 @@ fn executar_render(args: &[String]) -> Result<(), String> {
         .map_err(|erro| erro.to_string())?;
 
     kdenlive_mcp_plus::engine::render::render(&projeto, &saida, &opts).map_err(|erro| erro.to_string())
+}
+
+fn executar_frame(args: &[String]) -> Result<(), String> {
+    let uso_frame = "uso: kdenlive-mcp-plus frame <projeto> <saida.png> <quadro> [--overwrite]";
+
+    let mut projeto: Option<PathBuf> = None;
+    let mut saida: Option<PathBuf> = None;
+    let mut quadro: Option<i64> = None;
+    let mut overwrite = false;
+
+    for arg in args {
+        match arg.as_str() {
+            "--overwrite" => overwrite = true,
+            outro if projeto.is_none() => projeto = Some(PathBuf::from(outro)),
+            outro if saida.is_none() => saida = Some(PathBuf::from(outro)),
+            outro if quadro.is_none() => {
+                quadro = Some(outro.parse::<i64>().map_err(|_| {
+                    format!("quadro precisa ser um número inteiro, recebi \"{outro}\".\n\n{uso_frame}")
+                })?);
+            }
+            outro => return Err(format!("argumento inesperado: \"{outro}\".\n\n{uso_frame}")),
+        }
+    }
+
+    let projeto = projeto.ok_or_else(|| uso_frame.to_string())?;
+    let saida = saida.ok_or_else(|| uso_frame.to_string())?;
+    let quadro = quadro.ok_or_else(|| uso_frame.to_string())?;
+
+    kdenlive_mcp_plus::engine::render::render_frame(&projeto, &saida, quadro, overwrite)
+        .map_err(|erro| erro.to_string())
 }

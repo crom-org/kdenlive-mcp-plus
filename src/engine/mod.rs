@@ -3,6 +3,7 @@
 //! processo separado mora em `worker`.
 
 mod ffi;
+pub mod jobs;
 pub mod preset;
 pub mod render;
 pub mod worker;

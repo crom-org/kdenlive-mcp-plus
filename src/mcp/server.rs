@@ -1,13 +1,14 @@
-//! O servidor MCP em si: exatamente duas ferramentas nesta execução,
-//! `server_info` e `render_project` (ver docs/04-ferramentas.md para o
-//! status de todas as outras, ainda não implementadas).
+//! O servidor MCP: estado (`KdenliveMcpServer`) e a lista de ferramentas
+//! expostas (`#[tool_router]`, abaixo). A lógica de cada ferramenta mora
+//! nos módulos `crate::mcp::tools::*`, como métodos de
+//! `impl KdenliveMcpServer` — aqui ficam só a descrição (em inglês, ver
+//! CLAUDE.md) e a assinatura.
 //!
-//! Sucesso e erro de `render_project` sempre voltam na mesma estrutura
-//! (`RenderProjectOutput`, com `ok: bool` e `erro: Option<String>`), para que
-//! o agente trate os dois casos do mesmo jeito, em vez de precisar
-//! diferenciar um erro de protocolo MCP de um erro de negócio.
+//! Toda ferramenta sempre devolve `Json<serde_json::Value>` com `ok: bool`
+//! e, em caso de erro, `erro: <mensagem em português>` — nunca como erro de
+//! protocolo MCP (decisão D-017), para o agente tratar sucesso e erro do
+//! mesmo jeito.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::Json;
@@ -15,16 +16,26 @@ use rmcp::ServerHandler;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_handler, tool_router};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use crate::engine::{preset, worker};
+use crate::engine::jobs::JobRegistry;
+use crate::engine::preset;
+use crate::model::Session;
+use crate::mcp::params::*;
 
-/// Estado do servidor MCP. `render_lock` garante um render por vez neste
-/// processo (fila simples, ver docs/02-arquitetura.md).
+/// Estado do servidor MCP.
+///
+/// - `session`: o projeto atualmente aberto, se algum (ver `model::Session`).
+/// - `render_lock`: garante um render síncrono por vez (decisão D-016).
+/// - `jobs`: registro dos renders assíncronos em andamento (`export_render`
+///   com `wait=false`), para `render_progress`/`render_cancel`.
 #[derive(Clone)]
 pub struct KdenliveMcpServer {
-    render_lock: Arc<Mutex<()>>,
+    pub(crate) session: Arc<Mutex<Option<Session>>>,
+    pub(crate) render_lock: Arc<Mutex<()>>,
+    pub(crate) jobs: JobRegistry,
 }
 
 impl Default for KdenliveMcpServer {
@@ -36,7 +47,9 @@ impl Default for KdenliveMcpServer {
 impl KdenliveMcpServer {
     pub fn new() -> Self {
         Self {
+            session: Arc::new(Mutex::new(None)),
             render_lock: Arc::new(Mutex::new(())),
+            jobs: JobRegistry::new(),
         }
     }
 }
@@ -51,42 +64,37 @@ pub struct ServerInfoOutput {
     pub presets_disponiveis: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RenderProjectParams {
-    /// Caminho do projeto a renderizar (XML do MLT ou `.kdenlive`).
-    pub project_path: String,
-    /// Caminho de saída; a extensão precisa combinar com o preset escolhido.
-    pub output_path: String,
-    #[serde(default = "preset_padrao")]
-    pub preset: String,
-    #[serde(default)]
-    pub overwrite: bool,
+/// Monta uma resposta de erro no formato padrão (`ok: false, erro: ...`).
+pub(crate) fn erro(mensagem: impl Into<String>) -> Value {
+    json!({ "ok": false, "erro": mensagem.into() })
 }
 
-fn preset_padrao() -> String {
-    preset::DEFAULT_PRESET.to_string()
-}
+const SEM_PROJETO_ABERTO: &str = "nenhum projeto aberto; chame project_new ou project_open primeiro";
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RenderProjectOutput {
-    pub ok: bool,
-    pub caminho_saida: Option<String>,
-    pub tamanho_bytes: Option<u64>,
-    pub preset_usado: Option<String>,
-    pub duracao_segundos: Option<f64>,
-    pub notas: Option<String>,
-    pub erro: Option<String>,
-}
+impl KdenliveMcpServer {
+    /// Acesso de leitura ao projeto aberto. Devolve o erro padrão se
+    /// nenhum projeto estiver aberto.
+    pub(crate) async fn with_session<T>(&self, f: impl FnOnce(&Session) -> T) -> Result<T, Value> {
+        let guard = self.session.lock().await;
+        match guard.as_ref() {
+            Some(session) => Ok(f(session)),
+            None => Err(erro(SEM_PROJETO_ABERTO)),
+        }
+    }
 
-fn saida_de_erro(mensagem: String) -> RenderProjectOutput {
-    RenderProjectOutput {
-        ok: false,
-        caminho_saida: None,
-        tamanho_bytes: None,
-        preset_usado: None,
-        duracao_segundos: None,
-        notas: None,
-        erro: Some(mensagem),
+    /// Acesso de escrita ao projeto aberto. `f` devolve um
+    /// `Result<T, ModelError>`; qualquer `Err` é convertido para a
+    /// estrutura de erro padrão. Devolve o erro padrão se nenhum projeto
+    /// estiver aberto.
+    pub(crate) async fn with_session_mut<T>(
+        &self,
+        f: impl FnOnce(&mut Session) -> Result<T, crate::model::ModelError>,
+    ) -> Result<T, Value> {
+        let mut guard = self.session.lock().await;
+        match guard.as_mut() {
+            Some(session) => f(session).map_err(|e| erro(e.to_string())),
+            None => Err(erro(SEM_PROJETO_ABERTO)),
+        }
     }
 }
 
@@ -95,7 +103,7 @@ impl KdenliveMcpServer {
     #[tool(
         description = "Report the server name, server version, the linked libmlt version, and \
          the list of available render presets. Takes no parameters. Call this first to check \
-         connectivity and to discover valid preset names before calling render_project."
+         connectivity and to discover valid preset names before calling export_render."
     )]
     pub async fn server_info(&self) -> Json<ServerInfoOutput> {
         Json(ServerInfoOutput {
@@ -110,133 +118,255 @@ impl KdenliveMcpServer {
         })
     }
 
+    // -- Projeto --------------------------------------------------------
+
     #[tool(
-        description = "Render a Kdenlive/MLT XML project to a final video or audio file using \
-         the libmlt engine, in an isolated child process (a crash of the render engine never \
-         takes down this MCP server). Parameters: project_path (required, path to the .kdenlive \
-         or plain MLT XML project file), output_path (required, path to write to; its file \
-         extension must match the chosen preset's extension), preset (optional, default \
-         \"h264_hq\"; call server_info to list the valid preset names), overwrite (optional, \
-         default false; set true to replace an existing output_path, which is otherwise never \
-         silently overwritten). Always returns ok:true with output path, size in bytes, preset \
-         used and measured duration on success, or ok:false with a Portuguese error message \
-         explaining what happened and, when applicable, what to do about it."
+        description = "Create a new, empty project in this server's session (replacing any \
+         previously open project). Parameters: profile (optional, default \"atsc_1080p_25\"; a \
+         real libmlt profile name — width/height/fps/aspect ratio). Returns ok:true with the \
+         profile summary, or ok:false with an error listing valid profile names."
     )]
-    pub async fn render_project(
+    pub async fn project_new(&self, Parameters(params): Parameters<ProjectNewParams>) -> Json<Value> {
+        Json(self.project_new_impl(params).await)
+    }
+
+    #[tool(
+        description = "Open an existing .kdenlive or plain MLT XML project file into this \
+         server's session (replacing any previously open project). Parameter: path (required). \
+         Returns ok:true with a summary of what was loaded (profile, track count, bin clip \
+         count), or ok:false with a Portuguese error message."
+    )]
+    pub async fn project_open(&self, Parameters(params): Parameters<ProjectOpenParams>) -> Json<Value> {
+        Json(self.project_open_impl(params).await)
+    }
+
+    #[tool(
+        description = "Alias of project_open, for discoverability when the intent is \
+         specifically to import a native Kdenlive project file. Parameter: path (required). \
+         Same behavior and return shape as project_open."
+    )]
+    pub async fn project_import_kdenlive(
         &self,
-        Parameters(params): Parameters<RenderProjectParams>,
-    ) -> Json<RenderProjectOutput> {
-        Json(self.render_project_impl(params).await)
+        Parameters(params): Parameters<ProjectOpenParams>,
+    ) -> Json<Value> {
+        Json(self.project_open_impl(params).await)
     }
-}
 
-impl KdenliveMcpServer {
-    async fn render_project_impl(&self, params: RenderProjectParams) -> RenderProjectOutput {
-        let project_path = PathBuf::from(&params.project_path);
-        let output_path = PathBuf::from(&params.output_path);
-
-        let opts = match preset::resolve_preset(&params.preset, params.overwrite) {
-            Ok(opts) => opts,
-            Err(erro) => return saida_de_erro(erro.to_string()),
-        };
-
-        match output_path.extension().and_then(|e| e.to_str()) {
-            Some(extensao) if extensao.eq_ignore_ascii_case(opts.extension) => {}
-            Some(extensao) => {
-                return saida_de_erro(format!(
-                    "a extensão de output_path (\".{extensao}\") não combina com o preset \
-                     \"{}\", que espera \".{}\"",
-                    params.preset, opts.extension
-                ));
-            }
-            None => {
-                return saida_de_erro(format!(
-                    "output_path precisa terminar em \".{}\" para o preset \"{}\"",
-                    opts.extension, params.preset
-                ));
-            }
-        }
-
-        if !project_path.exists() {
-            return saida_de_erro(format!(
-                "projeto não encontrado: {}",
-                project_path.display()
-            ));
-        }
-        if output_path.exists() && !params.overwrite {
-            return saida_de_erro(format!(
-                "o arquivo de saída já existe: {} (chame novamente com overwrite=true para \
-                 sobrescrever)",
-                output_path.display()
-            ));
-        }
-
-        let _guard = self.render_lock.lock().await;
-
-        if let Err(erro) = worker::render_isolated(
-            &project_path,
-            &output_path,
-            &params.preset,
-            params.overwrite,
-        )
-        .await
-        {
-            return saida_de_erro(erro.to_string());
-        }
-
-        let tamanho_bytes = std::fs::metadata(&output_path).ok().map(|m| m.len());
-        let (duracao_segundos, notas) = medir_duracao(&output_path).await;
-
-        RenderProjectOutput {
-            ok: true,
-            caminho_saida: Some(output_path.display().to_string()),
-            tamanho_bytes,
-            preset_usado: Some(params.preset),
-            duracao_segundos,
-            notas,
-            erro: None,
-        }
+    #[tool(
+        description = "Save the current session's project to disk as MLT XML / .kdenlive. \
+         Parameter: path (optional; if omitted, saves to the path the project was opened from — \
+         an error if the project was never saved before and no path is given). Returns ok:true \
+         with the path written, or ok:false with an error (e.g. no project open)."
+    )]
+    pub async fn project_save(&self, Parameters(params): Parameters<ProjectSaveParams>) -> Json<Value> {
+        Json(self.project_save_impl(params).await)
     }
-}
 
-/// Mede a duração do arquivo renderizado com `ffprobe`. Se o `ffprobe` não
-/// existir no PATH, ou falhar, não é um erro de render: o arquivo já foi
-/// escrito com sucesso. Retorna `(None, Some(nota))` nesse caso.
-async fn medir_duracao(output_path: &Path) -> (Option<f64>, Option<String>) {
-    let resultado = tokio::process::Command::new("ffprobe")
-        .arg("-v")
-        .arg("error")
-        .arg("-show_entries")
-        .arg("format=duration")
-        .arg("-of")
-        .arg("csv=p=0")
-        .arg(output_path)
-        .output()
-        .await;
+    #[tool(
+        description = "Report metadata about the currently open project: video profile summary, \
+         track count and kind, bin clip count, and total timeline duration in frames. Takes no \
+         parameters. Returns ok:false if no project is open."
+    )]
+    pub async fn project_get_info(&self) -> Json<Value> {
+        Json(self.project_get_info_impl().await)
+    }
 
-    match resultado {
-        Ok(saida) if saida.status.success() => {
-            let texto = String::from_utf8_lossy(&saida.stdout);
-            match texto.trim().parse::<f64>() {
-                Ok(segundos) => (Some(segundos), None),
-                Err(_) => (
-                    None,
-                    Some(
-                        "ffprobe rodou, mas a duração retornada não pôde ser interpretada; \
-                         veja o arquivo de saída diretamente"
-                            .to_string(),
-                    ),
-                ),
-            }
-        }
-        Ok(_) => (
-            None,
-            Some("ffprobe rodou mas retornou erro ao medir a duração do arquivo".to_string()),
-        ),
-        Err(_) => (
-            None,
-            Some("ffprobe não encontrado no PATH; duração não medida".to_string()),
-        ),
+    #[tool(
+        description = "Check the currently open project for common problems: bin clips whose \
+         media file no longer exists on disk, and tracks with zero clips. Takes no parameters. \
+         Returns ok:true with a list of problems found (empty list means nothing was found), or \
+         ok:false if no project is open. This performs file-existence checks only; it never \
+         calls the libmlt engine."
+    )]
+    pub async fn project_validate(&self) -> Json<Value> {
+        Json(self.project_validate_impl().await)
+    }
+
+    // -- Bin --------------------------------------------------------------
+
+    #[tool(
+        description = "Import a media file into the current project's bin. Requires an open \
+         project (project_new/project_open). Parameters: path (required, path to the media \
+         file), name (optional display name; defaults to the file name). Probes the file's \
+         duration with ffprobe on a best-effort basis (never touches the libmlt engine \
+         directly). Returns ok:true with the new clip's id, or ok:false with an error."
+    )]
+    pub async fn bin_import_clip(
+        &self,
+        Parameters(params): Parameters<BinImportClipParams>,
+    ) -> Json<Value> {
+        Json(self.bin_import_clip_impl(params).await)
+    }
+
+    #[tool(
+        description = "List every clip in the current project's bin, with id, display name, \
+         media path and frame range. Takes no parameters. Returns ok:false if no project is \
+         open."
+    )]
+    pub async fn bin_list_clips(&self) -> Json<Value> {
+        Json(self.bin_list_clips_impl().await)
+    }
+
+    #[tool(
+        description = "Report detailed properties of one bin clip: display name, media path, \
+         frame range, and whether the media file still exists on disk. Parameter: clip_id \
+         (required). Returns ok:false if the clip id is not found."
+    )]
+    pub async fn bin_get_clip_details(
+        &self,
+        Parameters(params): Parameters<BinClipIdParams>,
+    ) -> Json<Value> {
+        Json(self.bin_get_clip_details_impl(params).await)
+    }
+
+    #[tool(
+        description = "Remove a clip from the project bin by id. If the clip is still placed on \
+         a timeline track, only the bin entry is removed (the underlying producer stays, since \
+         the track still references it). Parameter: clip_id (required). Returns ok:false if the \
+         clip id is not found in the bin."
+    )]
+    pub async fn bin_remove_clip(&self, Parameters(params): Parameters<BinClipIdParams>) -> Json<Value> {
+        Json(self.bin_remove_clip_impl(params).await)
+    }
+
+    // -- Timeline -----------------------------------------------------------
+
+    #[tool(
+        description = "Add a new, empty track to the current project's timeline. Parameter: \
+         kind (required, either \"video\" or \"audio\"). Returns ok:true with the new track's \
+         id, or ok:false with an error."
+    )]
+    pub async fn timeline_add_track(
+        &self,
+        Parameters(params): Parameters<TimelineAddTrackParams>,
+    ) -> Json<Value> {
+        Json(self.timeline_add_track_impl(params).await)
+    }
+
+    #[tool(
+        description = "Remove a track and all its clips from the timeline. The underlying bin \
+         producers are not deleted. Parameter: track_id (required). Returns ok:false if the \
+         track id is not found."
+    )]
+    pub async fn timeline_remove_track(
+        &self,
+        Parameters(params): Parameters<TimelineRemoveTrackParams>,
+    ) -> Json<Value> {
+        Json(self.timeline_remove_track_impl(params).await)
+    }
+
+    #[tool(
+        description = "Place a bin clip onto a specific track at a given time position (in \
+         frames). If position is past the current end of the track, a gap (blank) is created to \
+         fill it; placing a clip where it would overlap existing content on that track is an \
+         error in this phase (no ripple/shift insert yet). Parameters: track_id, producer_id \
+         (the bin clip's id), in_frame, out_frame, position (all required). Returns ok:true with \
+         a clip reference string (\"<track_id>:<index>\", this server's own convention, used by \
+         other timeline tools), or ok:false with an error."
+    )]
+    pub async fn timeline_add_clip(
+        &self,
+        Parameters(params): Parameters<TimelineAddClipParams>,
+    ) -> Json<Value> {
+        Json(self.timeline_add_clip_impl(params).await)
+    }
+
+    #[tool(
+        description = "List every track in the current project's timeline, in order, with kind \
+         (video/audio), clip count and total length in frames. Takes no parameters. Returns \
+         ok:false if no project is open."
+    )]
+    pub async fn timeline_list(&self) -> Json<Value> {
+        Json(self.timeline_list_impl().await)
+    }
+
+    #[tool(
+        description = "Report comprehensive timeline info: every track with its clips (producer \
+         id, in/out, position), total project duration in frames, and the video profile summary. \
+         Takes no parameters. Returns ok:false if no project is open."
+    )]
+    pub async fn timeline_get_info(&self) -> Json<Value> {
+        Json(self.timeline_get_info_impl().await)
+    }
+
+    // -- Exportação e render --------------------------------------------------
+
+    #[tool(
+        description = "Generate the MLT/Kdenlive XML of the current session's project. \
+         Parameters: path (optional; if given, writes the XML to that file; if omitted, returns \
+         the XML text directly in the response instead). This does not change the session's \
+         saved-to path (use project_save for that). Returns ok:false if no project is open."
+    )]
+    pub async fn export_xml(&self, Parameters(params): Parameters<ExportXmlParams>) -> Json<Value> {
+        Json(self.export_xml_impl(params).await)
+    }
+
+    #[tool(
+        description = "List the available render presets by name only (for the full \
+         description of each, see server_info or the project documentation). Takes no \
+         parameters."
+    )]
+    pub async fn export_list_presets(&self) -> Json<Value> {
+        Json(json!({ "ok": true, "presets": preset::preset_names() }))
+    }
+
+    #[tool(
+        description = "Render a project to a final video or audio file using the libmlt engine, \
+         in an isolated child process (a crash of the render engine never takes down this MCP \
+         server). Parameters: project_path (optional; if omitted, renders the project currently \
+         open in this server's session — an error if none is open), output_path (required; its \
+         file extension must match the chosen preset's extension), preset (optional, default \
+         \"h264_hq\"; call server_info to list valid preset names), overwrite (optional, default \
+         false), wait (optional, default true; set false to return immediately with a job_id and \
+         track it with render_progress/render_cancel instead of blocking this call until done). \
+         With wait=true, returns ok:true with output path, size in bytes, preset used and \
+         measured duration on success. With wait=false, returns ok:true with a job_id \
+         immediately. Either way, ok:false carries a Portuguese error message explaining what \
+         happened and, when applicable, what to do about it. Never silently overwrites an \
+         existing file."
+    )]
+    pub async fn export_render(
+        &self,
+        Parameters(params): Parameters<ExportRenderParams>,
+    ) -> Json<Value> {
+        Json(self.export_render_impl(params).await)
+    }
+
+    #[tool(
+        description = "Query the status and progress percentage of a render job started with \
+         export_render(wait=false). Parameter: job_id (required). Returns ok:true with status \
+         (\"em andamento\"/\"concluído\"/\"falhou\"/\"cancelado\") and a percent (0-100, \
+         best-effort, parsed from the render engine's own progress output), or ok:false if the \
+         job id is not known to this server (e.g. after a restart — job tracking does not \
+         persist)."
+    )]
+    pub async fn render_progress(&self, Parameters(params): Parameters<JobIdParams>) -> Json<Value> {
+        Json(self.render_progress_impl(params).await)
+    }
+
+    #[tool(
+        description = "Cancel a render job started with export_render(wait=false) by actually \
+         terminating its child process (unlike the original reference project's \
+         render_queue_stop, which only marked internal state without stopping anything — see \
+         this project's own documentation). Parameter: job_id (required). Returns ok:false if \
+         the job id is not found or is not currently running."
+    )]
+    pub async fn render_cancel(&self, Parameters(params): Parameters<JobIdParams>) -> Json<Value> {
+        Json(self.render_cancel_impl(params).await)
+    }
+
+    #[tool(
+        description = "Render a single frame of a project as a PNG image, in an isolated child \
+         process. Parameters: project_path (optional; defaults to the project open in this \
+         server's session), frame (required, 0-based frame number), output_path (required, path \
+         to write the PNG to), overwrite (optional, default false). Returns ok:true with the \
+         output path on success, or ok:false with an error."
+    )]
+    pub async fn preview_frame(
+        &self,
+        Parameters(params): Parameters<PreviewFrameParams>,
+    ) -> Json<Value> {
+        Json(self.preview_frame_impl(params).await)
     }
 }
 
@@ -256,9 +386,10 @@ impl ServerHandler for KdenliveMcpServer {
             .with_instructions(
                 "This server edits video projects headlessly using the libmlt engine (the \
                  same engine Kdenlive uses) and saves/reads native Kdenlive/MLT XML projects. \
-                 Only two tools are implemented so far: server_info (discover presets and \
-                 versions) and render_project (render a project to a final file). Call \
-                 server_info first if you need the list of valid preset names."
+                 Call server_info to discover render presets and versions. Call project_new or \
+                 project_open before any bin_*/timeline_*/export_* tool — they act on the \
+                 project currently open in this server's session. Call project_save (or \
+                 export_xml) to persist your edits to disk."
                     .to_string(),
             )
     }
