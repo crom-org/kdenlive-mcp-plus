@@ -346,6 +346,22 @@ pub struct TimelineSetZoomParams {
     pub zoom: f64,
 }
 
+// -- Fila de render -----------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RenderQueueAddParams {
+    /// Caminho do projeto. Se omitido, usa o projeto aberto na sessão: o
+    /// XML é copiado para um arquivo temporário já neste momento (adicionar
+    /// à fila), não quando o job realmente começa a rodar — edições feitas
+    /// na sessão depois de adicionar não afetam este job.
+    pub project_path: Option<String>,
+    pub output_path: String,
+    #[serde(default = "preset_padrao")]
+    pub preset: String,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
 // -- Montagem em lote ---------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]

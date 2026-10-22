@@ -10,6 +10,7 @@ mod filter;
 mod guide;
 mod marker;
 mod project;
+mod render_queue;
 mod session;
 mod timeline;
 mod track;

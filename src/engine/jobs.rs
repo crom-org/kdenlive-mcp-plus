@@ -19,6 +19,10 @@ use super::EngineError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobStatus {
+    /// Aguardando sua vez (outro render está ocupando o `render_lock`
+    /// compartilhado — só um render de verdade por vez, decisão D-016).
+    /// O processo filho ainda não foi criado; não há pid.
+    Queued,
     Running,
     Done,
     Failed(String),
@@ -28,6 +32,7 @@ pub enum JobStatus {
 impl JobStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            JobStatus::Queued => "na fila",
             JobStatus::Running => "em andamento",
             JobStatus::Done => "concluído",
             JobStatus::Failed(_) => "falhou",
@@ -68,11 +73,16 @@ impl JobRegistry {
         Self::default()
     }
 
-    /// Inicia um render em processo filho, sem esperar o resultado. Devolve
-    /// imediatamente o `RenderJob`, cujo progresso e status são
-    /// atualizados em segundo plano lendo o stderr do processo filho.
+    /// Registra um render para rodar assim que o `render_lock` compartilhado
+    /// estiver livre (um render de verdade por vez no processo, decisão
+    /// D-016 — vale tanto para `export_render(wait=false)` quanto para a
+    /// fila `render_queue_*`, que passam o mesmo lock usado por
+    /// `export_render(wait=true)`). Devolve imediatamente o `RenderJob`,
+    /// com status `Queued` até a vez dele chegar; o processo filho só é
+    /// criado depois disso, numa tarefa de fundo.
     pub async fn spawn(
         &self,
+        render_lock: Arc<Mutex<()>>,
         project: &Path,
         output: &Path,
         preset: &str,
@@ -83,42 +93,63 @@ impl JobRegistry {
         })?;
 
         let job_id = format!("job{}", self.next_id.fetch_add(1, Ordering::Relaxed));
-
-        let mut comando = Command::new(exe);
-        comando
-            .arg("render")
-            .arg(project)
-            .arg(output)
-            .arg("--preset")
-            .arg(preset)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        if overwrite {
-            comando.arg("--overwrite");
-        }
-
-        let mut child = comando.spawn().map_err(|erro| {
-            EngineError::InvalidText(format!("não consegui iniciar o processo de render: {erro}"))
-        })?;
-
         let job = Arc::new(RenderJob {
             id: job_id.clone(),
             output_path: output.to_path_buf(),
             percent: AtomicU8::new(0),
-            pid: AtomicU32::new(child.id().unwrap_or(0)),
-            status: Mutex::new(JobStatus::Running),
+            pid: AtomicU32::new(0),
+            status: Mutex::new(JobStatus::Queued),
         });
         self.jobs.lock().await.insert(job_id, job.clone());
 
-        let stderr = child
-            .stderr
-            .take()
-            .expect("stderr foi configurado como piped ao criar o comando");
+        let project = project.to_path_buf();
+        let output_buf = output.to_path_buf();
+        let preset = preset.to_string();
         let job_bg = job.clone();
 
         tokio::spawn(async move {
+            let _guarda_render = render_lock.lock().await;
+
+            {
+                let mut status = job_bg.status.lock().await;
+                if *status == JobStatus::Cancelled {
+                    // Foi cancelado enquanto esperava a vez; nunca chega a
+                    // criar o processo filho.
+                    return;
+                }
+                *status = JobStatus::Running;
+            }
+
+            let mut comando = Command::new(exe);
+            comando
+                .arg("render")
+                .arg(&project)
+                .arg(&output_buf)
+                .arg("--preset")
+                .arg(&preset)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            if overwrite {
+                comando.arg("--overwrite");
+            }
+
+            let mut child = match comando.spawn() {
+                Ok(c) => c,
+                Err(erro) => {
+                    *job_bg.status.lock().await = JobStatus::Failed(format!(
+                        "não consegui iniciar o processo de render: {erro}"
+                    ));
+                    return;
+                }
+            };
+            job_bg.pid.store(child.id().unwrap_or(0), Ordering::Relaxed);
+
+            let stderr = child
+                .stderr
+                .take()
+                .expect("stderr foi configurado como piped ao criar o comando");
             let mut linhas = BufReader::new(stderr).lines();
             let mut stderr_completo = String::new();
             while let Ok(Some(linha)) = linhas.next_line().await {
@@ -166,23 +197,33 @@ impl JobRegistry {
             .await
             .ok_or_else(|| EngineError::InvalidText(format!("job não encontrado: {job_id}")))?;
 
-        let pid = job.pid.load(Ordering::Relaxed);
-        if pid == 0 {
-            return Err(EngineError::InvalidText(
-                "este job ainda não tem um processo associado".to_string(),
-            ));
-        }
-
         let mut status = job.status.lock().await;
-        if *status != JobStatus::Running {
-            return Err(EngineError::InvalidText(format!(
+        match *status {
+            JobStatus::Queued => {
+                // Ainda nem criou o processo filho: só marca cancelado. A
+                // tarefa de fundo, ao finalmente pegar a vez no
+                // render_lock, vê isso e nunca chega a spawnar nada.
+                *status = JobStatus::Cancelled;
+                Ok(())
+            }
+            JobStatus::Running => {
+                let pid = job.pid.load(Ordering::Relaxed);
+                if pid == 0 {
+                    return Err(EngineError::InvalidText(
+                        "este job está marcado como em andamento mas ainda não tem um processo \
+                         associado; tente de novo em um instante"
+                            .to_string(),
+                    ));
+                }
+                kill_pid(pid)?;
+                *status = JobStatus::Cancelled;
+                Ok(())
+            }
+            _ => Err(EngineError::InvalidText(format!(
                 "job \"{job_id}\" já não está em andamento (status: {})",
                 status.as_str()
-            )));
+            ))),
         }
-        kill_pid(pid)?;
-        *status = JobStatus::Cancelled;
-        Ok(())
     }
 }
 

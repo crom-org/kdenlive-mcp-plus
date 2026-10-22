@@ -125,6 +125,11 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "project_validate",
             "render_cancel",
             "render_progress",
+            "render_queue_add",
+            "render_queue_list",
+            "render_queue_start",
+            "render_queue_status",
+            "render_queue_stop",
             "server_info",
             "session_history",
             "session_redo",
@@ -490,7 +495,10 @@ async fn render_progress_e_render_cancel_acompanham_um_job_assincrono() {
     .await;
     assert_ok(&progresso, "render_progress");
     assert!(
-        matches!(progresso["status"].as_str(), Some("em andamento") | Some("concluído")),
+        matches!(
+            progresso["status"].as_str(),
+            Some("na fila") | Some("em andamento") | Some("concluído")
+        ),
         "status inesperado logo após iniciar: {progresso}"
     );
 
@@ -1024,5 +1032,168 @@ async fn fase2_mover_aparar_dividir_remover_clipe_e_posicao_zoom() {
     assert_eq!(zoom_lido["zoom"], Value::from(2.5));
 
     let _ = std::fs::remove_file(&midia);
+    client.cancel().await.expect("fechamento limpo do cliente");
+}
+
+/// Confirma que dois renders assíncronos (`export_render` com `wait=false`)
+/// nunca rodam ao mesmo tempo: o segundo fica "na fila" enquanto o primeiro
+/// está "em andamento" (um render de verdade por vez, decisão D-016,
+/// agora valendo também para jobs assíncronos, não só para o caminho
+/// síncrono).
+#[tokio::test]
+async fn jobs_assincronos_sao_serializados_pelo_mesmo_render_lock() {
+    let client = iniciar_cliente().await;
+
+    let saida1 = caminho_temporario("fila_job1.mp4");
+    let saida2 = caminho_temporario("fila_job2.mp4");
+    let _ = std::fs::remove_file(&saida1);
+    let _ = std::fs::remove_file(&saida2);
+
+    let job1 = chamar(
+        &client,
+        "export_render",
+        serde_json::json!({
+            "project_path": caminho_fixture_media().to_string_lossy(),
+            "output_path": saida1.to_string_lossy(),
+            "preset": "h264_hq",
+            "overwrite": true,
+            "wait": false,
+        }),
+    )
+    .await;
+    let job1_id = job1["job_id"].as_str().unwrap().to_string();
+
+    let job2 = chamar(
+        &client,
+        "export_render",
+        serde_json::json!({
+            "project_path": caminho_fixture_media().to_string_lossy(),
+            "output_path": saida2.to_string_lossy(),
+            "preset": "h264_hq",
+            "overwrite": true,
+            "wait": false,
+        }),
+    )
+    .await;
+    let job2_id = job2["job_id"].as_str().unwrap().to_string();
+
+    // dá um instante para o job1 realmente começar a rodar
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let status1 = chamar(&client, "render_progress", serde_json::json!({ "job_id": job1_id })).await;
+    let status2 = chamar(&client, "render_progress", serde_json::json!({ "job_id": job2_id })).await;
+    assert_eq!(
+        status1["status"], Value::from("em andamento"),
+        "job1 deveria já estar rodando: {status1}"
+    );
+    assert_eq!(
+        status2["status"], Value::from("na fila"),
+        "job2 deveria estar esperando o render_lock, não rodando ao mesmo tempo que o job1: {status2}"
+    );
+
+    // espera os dois terminarem (a fixture "média" dura ~2s cada)
+    for _ in 0..50 {
+        let s1 = chamar(&client, "render_progress", serde_json::json!({ "job_id": job1_id })).await;
+        let s2 = chamar(&client, "render_progress", serde_json::json!({ "job_id": job2_id })).await;
+        if s1["status"] == "concluído" && s2["status"] == "concluído" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    let final1 = chamar(&client, "render_progress", serde_json::json!({ "job_id": job1_id })).await;
+    let final2 = chamar(&client, "render_progress", serde_json::json!({ "job_id": job2_id })).await;
+    assert_eq!(final1["status"], Value::from("concluído"), "job1: {final1}");
+    assert_eq!(final2["status"], Value::from("concluído"), "job2: {final2}");
+    assert!(saida1.exists());
+    assert!(saida2.exists());
+
+    let _ = std::fs::remove_file(&saida1);
+    let _ = std::fs::remove_file(&saida2);
+    client.cancel().await.expect("fechamento limpo do cliente");
+}
+
+/// Exercita a fila de render de ponta a ponta, incluindo a correção do bug
+/// do projeto original: `render_queue_stop` aqui encerra de verdade o
+/// render em andamento (processo filho morto) e cancela os pendentes, em
+/// vez de só marcar um estado interno.
+#[tokio::test]
+async fn render_queue_processa_em_sequencia_e_stop_encerra_de_verdade() {
+    let client = iniciar_cliente().await;
+
+    let saida1 = caminho_temporario("fila_render_queue1.mp4");
+    let saida2 = caminho_temporario("fila_render_queue2.mp4");
+    let saida3 = caminho_temporario("fila_render_queue3.mp4");
+    for s in [&saida1, &saida2, &saida3] {
+        let _ = std::fs::remove_file(s);
+    }
+
+    let status_vazia = chamar(&client, "render_queue_status", serde_json::json!({})).await;
+    assert_ok(&status_vazia, "render_queue_status (vazia)");
+    assert_eq!(status_vazia["processando"], Value::Bool(false));
+
+    for saida in [&saida1, &saida2, &saida3] {
+        let adicionado = chamar(
+            &client,
+            "render_queue_add",
+            serde_json::json!({
+                "project_path": caminho_fixture_media().to_string_lossy(),
+                "output_path": saida.to_string_lossy(),
+                "preset": "h264_hq",
+                "overwrite": true,
+            }),
+        )
+        .await;
+        assert_ok(&adicionado, "render_queue_add");
+        assert_eq!(adicionado["item"]["status"], Value::from("pendente"));
+    }
+
+    let lista = chamar(&client, "render_queue_list", serde_json::json!({})).await;
+    assert_ok(&lista, "render_queue_list");
+    assert_eq!(lista["fila"].as_array().map(Vec::len), Some(3));
+
+    // começar de novo antes de start deveria falhar (ainda não tem nada rodando pra parar)
+    let parar_sem_rodar = chamar(&client, "render_queue_stop", serde_json::json!({})).await;
+    assert_eq!(parar_sem_rodar["ok"], Value::Bool(false));
+
+    let iniciado = chamar(&client, "render_queue_start", serde_json::json!({})).await;
+    assert_ok(&iniciado, "render_queue_start");
+
+    let iniciar_de_novo = chamar(&client, "render_queue_start", serde_json::json!({})).await;
+    assert_eq!(iniciar_de_novo["ok"], Value::Bool(false), "não deveria processar a fila duas vezes ao mesmo tempo");
+
+    // dá tempo do primeiro job realmente começar a rodar
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let status_rodando = chamar(&client, "render_queue_status", serde_json::json!({})).await;
+    assert_eq!(status_rodando["processando"], Value::Bool(true));
+    assert_eq!(status_rodando["em_andamento"], Value::from(1));
+
+    // para a fila: deve matar o processo do job em andamento de verdade e
+    // cancelar os pendentes, sem deixar nenhum arquivo do que foi
+    // interrompido.
+    let parado = chamar(&client, "render_queue_stop", serde_json::json!({})).await;
+    assert_ok(&parado, "render_queue_stop");
+
+    // espera a fila realmente terminar de processar (o job em andamento é
+    // encerrado, e o loop de processamento sai)
+    let mut processando_no_final = true;
+    for _ in 0..30 {
+        let s = chamar(&client, "render_queue_status", serde_json::json!({})).await;
+        if s["processando"] == Value::Bool(false) {
+            processando_no_final = false;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(!processando_no_final, "a fila deveria ter parado de processar depois do stop");
+
+    let lista_final = chamar(&client, "render_queue_list", serde_json::json!({})).await;
+    let itens = lista_final["fila"].as_array().expect("deveria ter itens");
+    let cancelados = itens.iter().filter(|i| i["status"] == "cancelado").count();
+    assert!(cancelados >= 1, "pelo menos o job em andamento (ou os pendentes) deveriam ter sido cancelados: {lista_final}");
+
+    for saida in [&saida1, &saida2, &saida3] {
+        let _ = std::fs::remove_file(saida);
+    }
     client.cancel().await.expect("fechamento limpo do cliente");
 }

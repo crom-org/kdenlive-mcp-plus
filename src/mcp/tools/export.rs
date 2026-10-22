@@ -21,7 +21,7 @@ impl KdenliveMcpServer {
     /// aberta. Este arquivo temporário **não é removido** nesta fase (ver
     /// docs/09-riscos-e-bugs.md): seu ciclo de vida precisa sobreviver a um
     /// render assíncrono (`wait=false`), cujo fim este método não espera.
-    async fn resolve_project_path_for_render(&self, given: Option<&str>) -> Result<PathBuf, Value> {
+    pub(crate) async fn resolve_project_path_for_render(&self, given: Option<&str>) -> Result<PathBuf, Value> {
         if let Some(caminho) = given {
             return Ok(PathBuf::from(caminho));
         }
@@ -122,10 +122,16 @@ impl KdenliveMcpServer {
         } else {
             match self
                 .jobs
-                .spawn(&project_path, &output_path, &params.preset, params.overwrite)
+                .spawn(
+                    self.render_lock.clone(),
+                    &project_path,
+                    &output_path,
+                    &params.preset,
+                    params.overwrite,
+                )
                 .await
             {
-                Ok(job) => json!({ "ok": true, "job_id": job.id, "status": "em andamento" }),
+                Ok(job) => json!({ "ok": true, "job_id": job.id, "status": job.status().await.as_str() }),
                 Err(e) => erro(e.to_string()),
             }
         }

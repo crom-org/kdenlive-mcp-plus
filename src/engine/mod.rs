@@ -5,6 +5,7 @@
 mod ffi;
 pub mod jobs;
 pub mod preset;
+pub mod queue;
 pub mod render;
 pub mod worker;
 

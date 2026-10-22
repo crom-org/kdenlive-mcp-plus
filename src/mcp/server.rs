@@ -22,20 +22,26 @@ use tokio::sync::Mutex;
 
 use crate::engine::jobs::JobRegistry;
 use crate::engine::preset;
+use crate::engine::queue::RenderQueue;
 use crate::model::Session;
 use crate::mcp::params::*;
 
 /// Estado do servidor MCP.
 ///
 /// - `session`: o projeto atualmente aberto, se algum (ver `model::Session`).
-/// - `render_lock`: garante um render síncrono por vez (decisão D-016).
-/// - `jobs`: registro dos renders assíncronos em andamento (`export_render`
-///   com `wait=false`), para `render_progress`/`render_cancel`.
+/// - `render_lock`: garante um render de verdade por vez (decisão D-016) —
+///   compartilhado entre `export_render` síncrono, jobs assíncronos
+///   (`JobRegistry`) e a fila (`RenderQueue`).
+/// - `jobs`: registro dos renders assíncronos avulsos (`export_render` com
+///   `wait=false`), para `render_progress`/`render_cancel`.
+/// - `queue`: a fila de render (`render_queue_*`), construída por cima do
+///   mesmo `JobRegistry`/`render_lock`.
 #[derive(Clone)]
 pub struct KdenliveMcpServer {
     pub(crate) session: Arc<Mutex<Option<Session>>>,
     pub(crate) render_lock: Arc<Mutex<()>>,
     pub(crate) jobs: JobRegistry,
+    pub(crate) queue: RenderQueue,
 }
 
 impl Default for KdenliveMcpServer {
@@ -50,6 +56,7 @@ impl KdenliveMcpServer {
             session: Arc::new(Mutex::new(None)),
             render_lock: Arc::new(Mutex::new(())),
             jobs: JobRegistry::new(),
+            queue: RenderQueue::new(),
         }
     }
 }
@@ -841,6 +848,55 @@ impl KdenliveMcpServer {
         Parameters(params): Parameters<TimelineSetZoomParams>,
     ) -> Json<Value> {
         Json(self.timeline_set_zoom_impl(params).await)
+    }
+
+    // -- Fila de render (Fase 2) ---------------------------------------------
+
+    #[tool(
+        description = "Add a render job to the render queue (does not start it by itself — call \
+         render_queue_start to begin processing). Parameters: project_path (optional, defaults \
+         to the session's open project — captured at add time, not when the job actually runs), \
+         output_path (required), preset (optional, default \"h264_hq\"), overwrite (optional, \
+         default false). Returns ok:true with the new queue_id."
+    )]
+    pub async fn render_queue_add(
+        &self,
+        Parameters(params): Parameters<RenderQueueAddParams>,
+    ) -> Json<Value> {
+        Json(self.render_queue_add_impl(params).await)
+    }
+
+    #[tool(description = "List all render queue jobs (pending, running, done, failed or cancelled), in order. Takes no parameters.")]
+    pub async fn render_queue_list(&self) -> Json<Value> {
+        Json(self.render_queue_list_impl().await)
+    }
+
+    #[tool(
+        description = "Get render queue status: whether it is currently being processed, and a \
+         count of jobs by status. Takes no parameters."
+    )]
+    pub async fn render_queue_status(&self) -> Json<Value> {
+        Json(self.render_queue_status_impl().await)
+    }
+
+    #[tool(
+        description = "Start processing the render queue sequentially, one job at a time (same \
+         one-render-at-a-time guarantee as export_render). Takes no parameters. Returns ok:false \
+         if the queue is already being processed."
+    )]
+    pub async fn render_queue_start(&self) -> Json<Value> {
+        Json(self.render_queue_start_impl().await)
+    }
+
+    #[tool(
+        description = "Stop the render queue: actually terminates the currently running render's \
+         child process (unlike the original reference project's render_queue_stop, which only \
+         marked internal state without stopping anything) and cancels the remaining pending \
+         jobs without starting them. Takes no parameters. Returns ok:false if the queue is not \
+         currently being processed."
+    )]
+    pub async fn render_queue_stop(&self) -> Json<Value> {
+        Json(self.render_queue_stop_impl().await)
     }
 }
 
