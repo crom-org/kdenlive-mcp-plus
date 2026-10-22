@@ -10,6 +10,7 @@
 pub mod document;
 pub mod profile;
 pub mod session;
+pub mod srt;
 
 pub use document::ModelError;
 pub use session::{Session, TrackKind};

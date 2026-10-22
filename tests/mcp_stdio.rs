@@ -83,6 +83,8 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
     assert_eq!(
         nomes,
         vec![
+            "audio_normalize",
+            "audio_set_levels",
             "bin_create_folder",
             "bin_get_clip_details",
             "bin_import_clip",
@@ -97,8 +99,10 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "clip_set_color",
             "clip_set_opacity",
             "clip_set_speed",
+            "clip_set_transform",
             "export_list_presets",
             "export_render",
+            "export_thumbnail",
             "export_xml",
             "filter_add",
             "filter_list",
@@ -110,6 +114,9 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "guide_list",
             "guide_remove",
             "guide_update",
+            "keyframe_list",
+            "keyframe_remove",
+            "keyframe_set",
             "marker_add",
             "marker_list",
             "marker_remove",
@@ -135,6 +142,8 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "session_redo",
             "session_status",
             "session_undo",
+            "subtitle_export_srt",
+            "subtitle_import_srt",
             "timeline_add_clip",
             "timeline_add_track",
             "timeline_assemble_ranges",
@@ -150,6 +159,8 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "timeline_set_zoom",
             "timeline_split_clip",
             "timeline_trim_clip",
+            "title_add",
+            "title_update",
             "track_get_info",
             "track_move_down",
             "track_move_up",
@@ -1194,6 +1205,171 @@ async fn render_queue_processa_em_sequencia_e_stop_encerra_de_verdade() {
 
     for saida in [&saida1, &saida2, &saida3] {
         let _ = std::fs::remove_file(saida);
+    }
+    client.cancel().await.expect("fechamento limpo do cliente");
+}
+
+/// Exercita títulos, keyframes, legendas (SRT), áudio, transformação de
+/// clipe e miniatura — Fase 2, grupo 7.
+#[tokio::test]
+async fn fase2_titulos_keyframes_legendas_audio_transformacao_e_miniatura() {
+    let client = iniciar_cliente().await;
+
+    chamar(&client, "project_new", serde_json::json!({})).await;
+
+    // --- títulos -----------------------------------------------------------
+    let titulo = chamar(
+        &client,
+        "title_add",
+        serde_json::json!({ "text": "Olá, mundo!", "duration_frames": 50 }),
+    )
+    .await;
+    assert_ok(&titulo, "title_add");
+    let titulo_id = titulo["clip_id"].as_str().unwrap().to_string();
+
+    let atualizado = chamar(
+        &client,
+        "title_update",
+        serde_json::json!({ "clip_id": titulo_id, "text": "Texto novo", "font_size": 72 }),
+    )
+    .await;
+    assert_ok(&atualizado, "title_update");
+    let detalhes_titulo = chamar(&client, "bin_get_clip_details", serde_json::json!({ "clip_id": titulo_id })).await;
+    assert_eq!(detalhes_titulo["nome"], Value::from("Texto novo"));
+
+    // atualizar um clipe que não é título deve falhar
+    let midia = caminho_temporario("fase2_grupo7_midia.mp4");
+    let _ = std::fs::remove_file(&midia);
+    chamar(
+        &client,
+        "export_render",
+        serde_json::json!({
+            "project_path": caminho_fixture().to_string_lossy(),
+            "output_path": midia.to_string_lossy(),
+            "preset": "h264_hq",
+            "overwrite": true,
+        }),
+    )
+    .await;
+    let clipe_normal = chamar(&client, "bin_import_clip", serde_json::json!({ "path": midia.to_string_lossy() })).await;
+    let clip_id_normal = clipe_normal["clip_id"].as_str().unwrap().to_string();
+    let falha_update = chamar(
+        &client,
+        "title_update",
+        serde_json::json!({ "clip_id": clip_id_normal, "text": "x" }),
+    )
+    .await;
+    assert_eq!(falha_update["ok"], Value::Bool(false));
+
+    // --- keyframes -----------------------------------------------------------
+    let trilha = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "video" })).await;
+    let track_id = trilha["track_id"].as_str().unwrap().to_string();
+    let posicionado = chamar(
+        &client,
+        "timeline_add_clip",
+        serde_json::json!({ "track_id": track_id, "producer_id": clip_id_normal, "in_frame": 0, "out_frame": 49, "position": 0 }),
+    )
+    .await;
+    let clip_ref = posicionado["clip_ref"].as_str().unwrap().to_string();
+
+    let filtro = chamar(
+        &client,
+        "filter_add",
+        serde_json::json!({ "clip_ref": clip_ref, "service": "brightness" }),
+    )
+    .await;
+    let filter_id = filtro["filter_id"].as_str().unwrap().to_string();
+
+    chamar(
+        &client,
+        "keyframe_set",
+        serde_json::json!({ "clip_ref": clip_ref, "filter_id": filter_id, "param": "level", "frame": 0, "value": "0.0" }),
+    )
+    .await;
+    chamar(
+        &client,
+        "keyframe_set",
+        serde_json::json!({ "clip_ref": clip_ref, "filter_id": filter_id, "param": "level", "frame": 25, "value": "1.0" }),
+    )
+    .await;
+    let lista_kf = chamar(
+        &client,
+        "keyframe_list",
+        serde_json::json!({ "clip_ref": clip_ref, "filter_id": filter_id, "param": "level" }),
+    )
+    .await;
+    assert_ok(&lista_kf, "keyframe_list");
+    assert_eq!(lista_kf["keyframes"].as_array().map(Vec::len), Some(2));
+
+    let kf_removido = chamar(
+        &client,
+        "keyframe_remove",
+        serde_json::json!({ "clip_ref": clip_ref, "filter_id": filter_id, "param": "level", "frame": 0 }),
+    )
+    .await;
+    assert_ok(&kf_removido, "keyframe_remove");
+
+    // --- áudio -----------------------------------------------------------
+    let nivel = chamar(&client, "audio_set_levels", serde_json::json!({ "clip_ref": clip_ref, "db": -6.0 })).await;
+    assert_ok(&nivel, "audio_set_levels");
+    let normalizado = chamar(&client, "audio_normalize", serde_json::json!({ "clip_ref": clip_ref })).await;
+    assert_ok(&normalizado, "audio_normalize");
+
+    // --- transformação -----------------------------------------------------
+    let transformado = chamar(
+        &client,
+        "clip_set_transform",
+        serde_json::json!({ "clip_ref": clip_ref, "x": 0, "y": 0, "width": 640, "height": 360, "rotation": 15.0 }),
+    )
+    .await;
+    assert_ok(&transformado, "clip_set_transform");
+
+    // --- legendas (SRT) -----------------------------------------------------
+    let srt_path = caminho_temporario("fase2_grupo7_legendas.srt");
+    std::fs::write(
+        &srt_path,
+        "1\n00:00:00,000 --> 00:00:01,000\nPrimeira legenda\n\n2\n00:00:01,200 --> 00:00:02,000\nSegunda legenda\n",
+    )
+    .expect("escreve srt de teste");
+
+    let importado_srt = chamar(
+        &client,
+        "subtitle_import_srt",
+        serde_json::json!({ "path": srt_path.to_string_lossy() }),
+    )
+    .await;
+    assert_ok(&importado_srt, "subtitle_import_srt");
+    assert_eq!(importado_srt["quantidade_legendas"], Value::from(2));
+    let trilha_legendas = importado_srt["track_id"].as_str().unwrap().to_string();
+
+    let srt_exportado = caminho_temporario("fase2_grupo7_legendas_exportadas.srt");
+    let _ = std::fs::remove_file(&srt_exportado);
+    let exportado_srt = chamar(
+        &client,
+        "subtitle_export_srt",
+        serde_json::json!({ "track_id": trilha_legendas, "path": srt_exportado.to_string_lossy() }),
+    )
+    .await;
+    assert_ok(&exportado_srt, "subtitle_export_srt");
+    assert_eq!(exportado_srt["quantidade_legendas"], Value::from(2));
+    let conteudo_exportado = std::fs::read_to_string(&srt_exportado).expect("deveria ter escrito o srt");
+    assert!(conteudo_exportado.contains("Primeira legenda"));
+    assert!(conteudo_exportado.contains("Segunda legenda"));
+
+    // --- miniatura -----------------------------------------------------------
+    let thumb_path = caminho_temporario("fase2_grupo7_thumb.png");
+    let _ = std::fs::remove_file(&thumb_path);
+    let miniatura = chamar(
+        &client,
+        "export_thumbnail",
+        serde_json::json!({ "video_path": midia.to_string_lossy(), "output_path": thumb_path.to_string_lossy(), "at_seconds": 0.2 }),
+    )
+    .await;
+    assert_ok(&miniatura, "export_thumbnail");
+    assert!(thumb_path.exists());
+
+    for caminho in [&midia, &srt_path, &srt_exportado, &thumb_path] {
+        let _ = std::fs::remove_file(caminho);
     }
     client.cancel().await.expect("fechamento limpo do cliente");
 }

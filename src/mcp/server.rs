@@ -898,6 +898,151 @@ impl KdenliveMcpServer {
     pub async fn render_queue_stop(&self) -> Json<Value> {
         Json(self.render_queue_stop_impl().await)
     }
+
+    // -- Títulos (Fase 2) ----------------------------------------------------
+
+    #[tool(
+        description = "Create a title clip with text, font, color and duration, in the project \
+         bin (built on the standard MLT \"pango\" text producer — not an attempt to replicate \
+         Kdenlive's own internal title XML format, which this project could not confirm the \
+         exact schema of). Parameters: text, duration_frames (both required), font_family \
+         (optional, default \"Sans\"), font_size (optional, default 48), color (optional, \
+         default opaque white \"0xffffffff\", format 0xRRGGBBAA). Place it on a track with \
+         timeline_add_clip like any other bin clip."
+    )]
+    pub async fn title_add(&self, Parameters(params): Parameters<TitleAddParams>) -> Json<Value> {
+        Json(self.title_add_impl(params).await)
+    }
+
+    #[tool(
+        description = "Update the text and/or style of an existing title clip. Parameter: \
+         clip_id (required, the bin clip's id); text, font_family, font_size, color (all \
+         optional — only given fields are changed). Returns ok:false if clip_id is not a title \
+         clip."
+    )]
+    pub async fn title_update(&self, Parameters(params): Parameters<TitleUpdateParams>) -> Json<Value> {
+        Json(self.title_update_impl(params).await)
+    }
+
+    // -- Keyframes (Fase 2) --------------------------------------------------
+
+    #[tool(
+        description = "Set the value of a filter parameter at a specific frame, with \
+         interpolation (uses the libmlt animated-property syntax \"frame=value;frame=value...\", \
+         verified by rendering in this project's own tests). Parameters: clip_ref, filter_id, \
+         param, frame, value (all required; value as a string — the raw value the filter \
+         expects at that keyframe). Replaces any existing keyframe at the same frame."
+    )]
+    pub async fn keyframe_set(&self, Parameters(params): Parameters<KeyframeSetParams>) -> Json<Value> {
+        Json(self.keyframe_set_impl(params).await)
+    }
+
+    #[tool(
+        description = "List the keyframes of a filter parameter, in frame order. Parameters: \
+         clip_ref, filter_id, param (all required)."
+    )]
+    pub async fn keyframe_list(&self, Parameters(params): Parameters<KeyframeListParams>) -> Json<Value> {
+        Json(self.keyframe_list_impl(params).await)
+    }
+
+    #[tool(
+        description = "Remove the keyframe at a specific frame. Parameters: clip_ref, \
+         filter_id, param, frame (all required). Returns ok:false if there is no keyframe at \
+         that exact frame."
+    )]
+    pub async fn keyframe_remove(&self, Parameters(params): Parameters<KeyframeRemoveParams>) -> Json<Value> {
+        Json(self.keyframe_remove_impl(params).await)
+    }
+
+    // -- Legendas (Fase 2) -----------------------------------------------------
+
+    #[tool(
+        description = "Import an .srt subtitle file and create synchronized title clips (see \
+         title_add) on a track, one per subtitle entry, positioned and timed from the SRT's own \
+         timestamps (converted using the project's frame rate). Parameters: path (required); \
+         track_id (optional, a new video track is created if omitted), font_family, font_size, \
+         color (all optional, same defaults and meaning as title_add). Returns ok:true with the \
+         track_id used and the list of clip_refs created."
+    )]
+    pub async fn subtitle_import_srt(
+        &self,
+        Parameters(params): Parameters<SubtitleImportSrtParams>,
+    ) -> Json<Value> {
+        Json(self.subtitle_import_srt_impl(params).await)
+    }
+
+    #[tool(
+        description = "Export the timeline's subtitles on a track as an .srt file: every title \
+         clip (pango producer with text) on that track becomes one SRT entry, timed from its \
+         timeline position and the project's frame rate. Parameters: track_id, path (both \
+         required). Returns ok:false if the track has no title clips."
+    )]
+    pub async fn subtitle_export_srt(
+        &self,
+        Parameters(params): Parameters<SubtitleExportSrtParams>,
+    ) -> Json<Value> {
+        Json(self.subtitle_export_srt_impl(params).await)
+    }
+
+    // -- Áudio (Fase 2) --------------------------------------------------------
+
+    #[tool(
+        description = "Set the level in dB of a timeline clip, via the standard libmlt \"volume\" \
+         filter's level parameter, attached to this specific clip. Parameters: clip_ref, db \
+         (both required)."
+    )]
+    pub async fn audio_set_levels(
+        &self,
+        Parameters(params): Parameters<AudioSetLevelsParams>,
+    ) -> Json<Value> {
+        Json(self.audio_set_levels_impl(params).await)
+    }
+
+    #[tool(
+        description = "Normalize the loudness of a timeline clip to a target amplitude in dB, \
+         via the standard libmlt \"volume\" filter's normalize parameter. Parameters: clip_ref \
+         (required), target_db (optional, default -12.0, the filter's own default)."
+    )]
+    pub async fn audio_normalize(
+        &self,
+        Parameters(params): Parameters<AudioNormalizeParams>,
+    ) -> Json<Value> {
+        Json(self.audio_normalize_impl(params).await)
+    }
+
+    // -- Transformação (Fase 2) --------------------------------------------------
+
+    #[tool(
+        description = "Define position, scale and rotation of a timeline clip, via the standard \
+         libmlt \"qtblend\" filter (rect + rotation parameters), attached to this specific clip. \
+         This tool only passes your exact values through to qtblend; it does not compute any \
+         geometry on your behalf (see clip_reframe_vertical, listed as planned/not implemented \
+         in this project's own tool catalog, for why). Parameters: clip_ref, x, y, width, height \
+         (all required, in pixels — the destination rectangle qtblend draws the source into), \
+         rotation (optional, degrees)."
+    )]
+    pub async fn clip_set_transform(
+        &self,
+        Parameters(params): Parameters<ClipSetTransformParams>,
+    ) -> Json<Value> {
+        Json(self.clip_set_transform_impl(params).await)
+    }
+
+    // -- Miniatura (Fase 2) -----------------------------------------------------
+
+    #[tool(
+        description = "Generate a thumbnail image from an already-rendered video file (not an \
+         MLT project — use preview_frame for that) by extracting one frame with ffmpeg directly \
+         (a plain subprocess call, never the libmlt engine). Parameters: video_path, output_path \
+         (both required), at_seconds (optional, default 1.0), overwrite (optional, default \
+         false)."
+    )]
+    pub async fn export_thumbnail(
+        &self,
+        Parameters(params): Parameters<ExportThumbnailParams>,
+    ) -> Json<Value> {
+        Json(self.export_thumbnail_impl(params).await)
+    }
 }
 
 #[tool_handler]

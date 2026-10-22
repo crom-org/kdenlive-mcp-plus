@@ -362,6 +362,145 @@ pub struct RenderQueueAddParams {
     pub overwrite: bool,
 }
 
+// -- Títulos ------------------------------------------------------------------
+
+fn familia_padrao() -> String {
+    "Sans".to_string()
+}
+
+fn tamanho_fonte_padrao() -> i64 {
+    48
+}
+
+fn cor_titulo_padrao() -> String {
+    "0xffffffff".to_string()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TitleAddParams {
+    pub text: String,
+    /// Duração do clipe de título, em quadros.
+    pub duration_frames: i64,
+    #[serde(default = "familia_padrao")]
+    pub font_family: String,
+    #[serde(default = "tamanho_fonte_padrao")]
+    pub font_size: i64,
+    /// Cor no formato `0xRRGGBBAA` (ex. branco opaco: `0xffffffff`).
+    #[serde(default = "cor_titulo_padrao")]
+    pub color: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TitleUpdateParams {
+    /// Id do clipe de título (da bin).
+    pub clip_id: String,
+    pub text: Option<String>,
+    pub font_family: Option<String>,
+    pub font_size: Option<i64>,
+    pub color: Option<String>,
+}
+
+// -- Keyframes ------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KeyframeSetParams {
+    pub clip_ref: String,
+    pub filter_id: String,
+    pub param: String,
+    pub frame: i64,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KeyframeListParams {
+    pub clip_ref: String,
+    pub filter_id: String,
+    pub param: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KeyframeRemoveParams {
+    pub clip_ref: String,
+    pub filter_id: String,
+    pub param: String,
+    pub frame: i64,
+}
+
+// -- Legendas -------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SubtitleImportSrtParams {
+    pub path: String,
+    /// Trilha onde colocar os clipes de título gerados. Se omitida, uma
+    /// nova trilha de vídeo é criada.
+    pub track_id: Option<String>,
+    #[serde(default = "familia_padrao")]
+    pub font_family: String,
+    #[serde(default = "tamanho_fonte_padrao")]
+    pub font_size: i64,
+    #[serde(default = "cor_titulo_padrao")]
+    pub color: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SubtitleExportSrtParams {
+    /// Trilha de onde ler os clipes de título (texto) a exportar.
+    pub track_id: String,
+    pub path: String,
+}
+
+// -- Áudio ----------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AudioSetLevelsParams {
+    pub clip_ref: String,
+    /// Nível em dB (ex. `-6.0`, `0.0`, `3.0`).
+    pub db: f64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AudioNormalizeParams {
+    pub clip_ref: String,
+    /// Amplitude alvo em dB (padrão do próprio filtro MLT: -12.0).
+    #[serde(default = "normalize_padrao")]
+    pub target_db: f64,
+}
+
+fn normalize_padrao() -> f64 {
+    -12.0
+}
+
+// -- Transformação de clipe ------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClipSetTransformParams {
+    pub clip_ref: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// Graus de rotação (opcional).
+    pub rotation: Option<f64>,
+}
+
+// -- Miniatura --------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExportThumbnailParams {
+    /// Caminho de um vídeo já renderizado (não um projeto MLT).
+    pub video_path: String,
+    pub output_path: String,
+    /// Instante, em segundos, de onde extrair a miniatura. Padrão: 1.0.
+    #[serde(default = "um_segundo")]
+    pub at_seconds: f64,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+fn um_segundo() -> f64 {
+    1.0
+}
+
 // -- Montagem em lote ---------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]

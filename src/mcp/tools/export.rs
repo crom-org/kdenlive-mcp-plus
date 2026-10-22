@@ -1,5 +1,5 @@
 //! `export_xml`, `export_render`, `render_progress`, `render_cancel`,
-//! `preview_frame`.
+//! `preview_frame`, `export_thumbnail`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use crate::engine::jobs::JobStatus;
 use crate::engine::{preset, worker};
 use crate::mcp::ffprobe;
-use crate::mcp::params::{ExportRenderParams, ExportXmlParams, JobIdParams, PreviewFrameParams};
+use crate::mcp::params::{ExportRenderParams, ExportThumbnailParams, ExportXmlParams, JobIdParams, PreviewFrameParams};
 use crate::mcp::server::{KdenliveMcpServer, erro};
 use crate::model::document;
 
@@ -203,6 +203,51 @@ impl KdenliveMcpServer {
                 "quadro": params.frame,
             }),
             Err(e) => erro(e.to_string()),
+        }
+    }
+
+    /// Gera uma miniatura de um vídeo **já renderizado** (não um projeto
+    /// MLT) com `ffmpeg` diretamente — um subprocesso comum, sem nenhuma
+    /// chamada ao libmlt.
+    pub(crate) async fn export_thumbnail_impl(&self, params: ExportThumbnailParams) -> Value {
+        let video_path = PathBuf::from(&params.video_path);
+        if !video_path.exists() {
+            return erro(format!("vídeo não encontrado: {}", video_path.display()));
+        }
+        let output_path = PathBuf::from(&params.output_path);
+        if output_path.exists() && !params.overwrite {
+            return erro(format!(
+                "o arquivo de saída já existe: {} (chame novamente com overwrite=true)",
+                output_path.display()
+            ));
+        }
+        if params.at_seconds < 0.0 {
+            return erro("at_seconds não pode ser negativo".to_string());
+        }
+
+        let saida = tokio::process::Command::new("ffmpeg")
+            .arg("-y")
+            .arg("-ss")
+            .arg(params.at_seconds.to_string())
+            .arg("-i")
+            .arg(&video_path)
+            .arg("-frames:v")
+            .arg("1")
+            .arg(&output_path)
+            .output()
+            .await;
+
+        match saida {
+            Ok(saida) if saida.status.success() && output_path.exists() => json!({
+                "ok": true,
+                "caminho_saida": output_path.display().to_string(),
+                "at_seconds": params.at_seconds,
+            }),
+            Ok(saida) => erro(format!(
+                "ffmpeg terminou com erro ao gerar a miniatura: {}",
+                String::from_utf8_lossy(&saida.stderr).trim()
+            )),
+            Err(e) => erro(format!("não consegui rodar o ffmpeg: {e}")),
         }
     }
 }

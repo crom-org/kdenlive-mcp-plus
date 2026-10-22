@@ -942,6 +942,18 @@ pub fn list_clips(root: &Element, track_id: &str) -> Vec<(usize, String, i64, i6
         .collect()
 }
 
+/// Como `list_clips`, mas também traz a posição absoluta (em quadros) de
+/// cada clipe na trilha: `(índice, producer_id, in, out, position)`.
+pub fn list_clips_with_position(root: &Element, track_id: &str) -> Vec<(usize, String, i64, i64, i64)> {
+    let Some(playlist) = find_playlist(root, track_id) else {
+        return Vec::new();
+    };
+    list_clips(root, track_id)
+        .into_iter()
+        .map(|(indice, producer, in_f, out_f)| (indice, producer, in_f, out_f, position_of_slot(playlist, indice)))
+        .collect()
+}
+
 /// Duração total do projeto: o maior fim de trilha entre todas as trilhas.
 pub fn project_duration(root: &Element) -> i64 {
     track_ids(root)
@@ -1145,6 +1157,232 @@ pub fn set_or_create_filter_param(
         None => add_filter(root, track_id, index, service)?,
     };
     set_filter_param(root, track_id, index, &filter_id, param, value)?;
+    Ok(filter_id)
+}
+
+/// Lê o valor atual de um parâmetro de um filtro de um clipe (`None` se o
+/// filtro não existir ou o parâmetro nunca tiver sido definido).
+pub fn get_filter_param(root: &Element, track_id: &str, index: usize, filter_id: &str, param: &str) -> Option<String> {
+    let entry = get_clip(root, track_id, index)?;
+    let filtro = entry
+        .children
+        .iter()
+        .filter_map(XMLNode::as_element)
+        .find(|e| attr_eq(e, "filter", "id", filter_id))?;
+    get_property(filtro, param)
+}
+
+// ---------------------------------------------------------------------------
+// Keyframes de um parâmetro de filtro — formato de propriedade animada do
+// próprio MLT (`"quadro=valor;quadro=valor;..."`, confirmado renderizando
+// um `brightness.level` com keyframes neste ambiente; ver docs/06-testes.md).
+// ---------------------------------------------------------------------------
+
+fn parse_keyframes(valor: &str) -> Vec<(i64, String)> {
+    valor
+        .split(';')
+        .filter_map(|parte| {
+            let parte = parte.trim();
+            if parte.is_empty() {
+                return None;
+            }
+            let (quadro, v) = parte.split_once('=')?;
+            let quadro: i64 = quadro.trim().parse().ok()?;
+            Some((quadro, v.trim().to_string()))
+        })
+        .collect()
+}
+
+fn format_keyframes(mut pares: Vec<(i64, String)>) -> String {
+    pares.sort_by_key(|(quadro, _)| *quadro);
+    pares
+        .into_iter()
+        .map(|(quadro, valor)| format!("{quadro}={valor}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Define o valor de um parâmetro de filtro num quadro específico,
+/// preservando os outros keyframes já existentes (substitui o keyframe
+/// daquele quadro exato, se já houver um).
+pub fn keyframe_set(
+    root: &mut Element,
+    track_id: &str,
+    index: usize,
+    filter_id: &str,
+    param: &str,
+    frame: i64,
+    value: &str,
+) -> Result<(), ModelError> {
+    let atual = get_filter_param(root, track_id, index, filter_id, param).unwrap_or_default();
+    let mut pares = parse_keyframes(&atual);
+    pares.retain(|(f, _)| *f != frame);
+    pares.push((frame, value.to_string()));
+    set_filter_param(root, track_id, index, filter_id, param, &format_keyframes(pares))
+}
+
+/// Lista os keyframes `(quadro, valor)` de um parâmetro, em ordem.
+pub fn keyframe_list(root: &Element, track_id: &str, index: usize, filter_id: &str, param: &str) -> Vec<(i64, String)> {
+    let Some(atual) = get_filter_param(root, track_id, index, filter_id, param) else {
+        return Vec::new();
+    };
+    let mut pares = parse_keyframes(&atual);
+    pares.sort_by_key(|(f, _)| *f);
+    pares
+}
+
+/// Remove o keyframe de um quadro específico.
+pub fn keyframe_remove(
+    root: &mut Element,
+    track_id: &str,
+    index: usize,
+    filter_id: &str,
+    param: &str,
+    frame: i64,
+) -> Result<(), ModelError> {
+    let atual = get_filter_param(root, track_id, index, filter_id, param).unwrap_or_default();
+    let mut pares = parse_keyframes(&atual);
+    let antes = pares.len();
+    pares.retain(|(f, _)| *f != frame);
+    if pares.len() == antes {
+        return Err(ModelError::NotFound(format!("nenhum keyframe no quadro {frame}")));
+    }
+    set_filter_param(root, track_id, index, filter_id, param, &format_keyframes(pares))
+}
+
+// ---------------------------------------------------------------------------
+// Títulos: produtor `pango` padrão do MLT (texto, fonte, cor, duração) —
+// não o formato XML interno `kdenlivetitle` do Kdenlive, cujo esquema
+// exato não foi confirmado nesta pesquisa (ver docs/09-riscos-e-bugs.md).
+// ---------------------------------------------------------------------------
+
+/// Cria um clipe de título (produtor `pango`) na bin do projeto. Devolve o
+/// id do novo produtor.
+#[allow(clippy::too_many_arguments)]
+pub fn add_title_clip(
+    root: &mut Element,
+    id: &str,
+    text: &str,
+    duration_frames: i64,
+    font_family: &str,
+    font_size: i64,
+    color_hex: &str,
+) -> Result<String, ModelError> {
+    if duration_frames <= 0 {
+        return Err(ModelError::Invalid("a duração precisa ser maior que zero".to_string()));
+    }
+    let id = id.to_string();
+    let mut producer = Element::new("producer");
+    producer.attributes.insert("id".to_string(), id.clone());
+    producer.attributes.insert("in".to_string(), "0".to_string());
+    producer.attributes.insert("out".to_string(), (duration_frames - 1).to_string());
+    set_property(&mut producer, "mlt_service", "pango");
+    set_property(&mut producer, "text", text);
+    set_property(&mut producer, "family", font_family);
+    set_property(&mut producer, "size", &font_size.to_string());
+    set_property(&mut producer, "fgcolour", color_hex);
+    set_property(&mut producer, "bgcolour", "0x00000000");
+    set_property(&mut producer, "kdenlive:clipname", text);
+
+    let insert_at = root
+        .children
+        .iter()
+        .position(|n| matches!(n, XMLNode::Element(e) if attr_eq(e, "playlist", "id", MAIN_BIN_ID)))
+        .unwrap_or(root.children.len());
+    root.children.insert(insert_at, XMLNode::Element(producer));
+
+    let bin = main_bin_mut(root)
+        .ok_or_else(|| ModelError::NotFound(format!("playlist \"{MAIN_BIN_ID}\" não encontrada")))?;
+    let mut entry = Element::new("entry");
+    entry.attributes.insert("producer".to_string(), id.clone());
+    bin.children.push(XMLNode::Element(entry));
+
+    Ok(id)
+}
+
+/// Atualiza texto e/ou aparência de um clipe de título já existente.
+/// Erro se `producer_id` não for um clipe de título (`mlt_service=pango`).
+pub fn update_title_clip(
+    root: &mut Element,
+    producer_id: &str,
+    text: Option<&str>,
+    font_family: Option<&str>,
+    font_size: Option<i64>,
+    color_hex: Option<&str>,
+) -> Result<(), ModelError> {
+    let producer = find_producer_mut(root, producer_id)
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {producer_id}")))?;
+    if get_property(producer, "mlt_service").as_deref() != Some("pango") {
+        return Err(ModelError::Invalid(format!(
+            "\"{producer_id}\" não é um clipe de título (mlt_service != pango)"
+        )));
+    }
+    if let Some(t) = text {
+        set_property(producer, "text", t);
+        set_property(producer, "kdenlive:clipname", t);
+    }
+    if let Some(f) = font_family {
+        set_property(producer, "family", f);
+    }
+    if let Some(s) = font_size {
+        set_property(producer, "size", &s.to_string());
+    }
+    if let Some(c) = color_hex {
+        set_property(producer, "fgcolour", c);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Áudio: filtro `volume` padrão do MLT (nível em dB e normalização) —
+// confirmado via `melt -query "filter=volume"`.
+// ---------------------------------------------------------------------------
+
+/// Define o nível (em dB) de um clipe, via o parâmetro `level` do filtro
+/// `volume` (cria o filtro se ainda não existir no clipe).
+pub fn audio_set_level(root: &mut Element, track_id: &str, index: usize, db: f64) -> Result<String, ModelError> {
+    set_or_create_filter_param(root, track_id, index, "volume", "level", &format!("{db}dB"))
+}
+
+/// Normaliza o loudness de um clipe para a amplitude alvo (em dB, ex.
+/// `-12.0` para o padrão do próprio filtro `volume`), via seu parâmetro
+/// `normalize`.
+pub fn audio_normalize(root: &mut Element, track_id: &str, index: usize, target_db: f64) -> Result<String, ModelError> {
+    set_or_create_filter_param(root, track_id, index, "volume", "normalize", &format!("{target_db}dB"))
+}
+
+// ---------------------------------------------------------------------------
+// Transformação de clipe: filtro `qtblend` padrão do MLT (posição, escala,
+// rotação) — confirmado via `melt -query "filter=qtblend"` e renderização.
+// Este projeto só repassa os valores dados pelo agente para o parâmetro
+// `rect`/`rotation` do qtblend; não calcula geometria nenhuma por conta
+// própria (ver `clip_reframe_vertical`, ainda não implementada, em
+// docs/04-ferramentas.md, por depender de cálculo geométrico que não dá
+// para verificar visualmente neste ambiente sem tela).
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub fn set_clip_transform(
+    root: &mut Element,
+    track_id: &str,
+    index: usize,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    rotation: Option<f64>,
+) -> Result<String, ModelError> {
+    let filter_id = set_or_create_filter_param(
+        root,
+        track_id,
+        index,
+        "qtblend",
+        "rect",
+        &format!("{x} {y} {width} {height} 1"),
+    )?;
+    if let Some(graus) = rotation {
+        set_filter_param(root, track_id, index, &filter_id, "rotation", &graus.to_string())?;
+    }
     Ok(filter_id)
 }
 
@@ -1765,6 +2003,88 @@ mod tests {
         assert!(matches!(erro, ModelError::Invalid(_)));
         let erro = split_clip(&mut doc, &track_id, 1, 999).expect_err("split_at fora do range deveria falhar");
         assert!(matches!(erro, ModelError::Invalid(_)));
+    }
+
+    #[test]
+    fn titulo_cria_le_e_atualiza() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let id = add_title_clip(&mut doc, "producer0", "Olá", 50, "Sans", 48, "0xffffffff").expect("cria título");
+
+        let p = find_producer(&doc, &id).unwrap();
+        assert_eq!(get_property(p, "mlt_service"), Some("pango".to_string()));
+        assert_eq!(get_property(p, "text"), Some("Olá".to_string()));
+        assert_eq!(p.attributes.get("out"), Some(&"49".to_string()));
+        assert!(bin_clip_ids(&doc).contains(&id), "título deveria entrar na bin, como qualquer clipe");
+
+        update_title_clip(&mut doc, &id, Some("Novo texto"), None, Some(72), None).expect("atualiza");
+        let p = find_producer(&doc, &id).unwrap();
+        assert_eq!(get_property(p, "text"), Some("Novo texto".to_string()));
+        assert_eq!(get_property(p, "size"), Some("72".to_string()));
+
+        // id que não é um pango deve falhar
+        let outro = add_bin_clip(&mut doc, "producer1", "/tmp/a.mp4", "a", 0, 9).expect("importa outro clipe");
+        let erro = update_title_clip(&mut doc, &outro, Some("x"), None, None, None).expect_err("não é título");
+        assert!(matches!(erro, ModelError::Invalid(_)));
+    }
+
+    #[test]
+    fn keyframes_sao_definidos_listados_e_removidos_em_ordem() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let producer_id = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a", 0, 99).expect("importa");
+        let track_id = add_track(&mut doc, "playlist0", TrackKind::Video).expect("cria trilha");
+        add_clip_to_track(&mut doc, &track_id, &producer_id, 0, 99, 0).expect("posiciona");
+        let filter_id = add_filter(&mut doc, &track_id, 0, "brightness").expect("adiciona filtro");
+
+        assert!(keyframe_list(&doc, &track_id, 0, &filter_id, "level").is_empty());
+
+        keyframe_set(&mut doc, &track_id, 0, &filter_id, "level", 50, "1.0").expect("define keyframe");
+        keyframe_set(&mut doc, &track_id, 0, &filter_id, "level", 0, "0.0").expect("define outro, fora de ordem");
+        keyframe_set(&mut doc, &track_id, 0, &filter_id, "level", 99, "0.0").expect("e outro");
+
+        let lista = keyframe_list(&doc, &track_id, 0, &filter_id, "level");
+        assert_eq!(
+            lista,
+            vec![(0, "0.0".to_string()), (50, "1.0".to_string()), (99, "0.0".to_string())],
+            "deveriam vir ordenados por quadro, mesmo tendo sido definidos fora de ordem"
+        );
+
+        // redefinir o mesmo quadro substitui, não duplica
+        keyframe_set(&mut doc, &track_id, 0, &filter_id, "level", 50, "0.5").expect("redefine");
+        assert_eq!(keyframe_list(&doc, &track_id, 0, &filter_id, "level").len(), 3);
+        assert!(keyframe_list(&doc, &track_id, 0, &filter_id, "level").contains(&(50, "0.5".to_string())));
+
+        keyframe_remove(&mut doc, &track_id, 0, &filter_id, "level", 0).expect("remove");
+        assert_eq!(keyframe_list(&doc, &track_id, 0, &filter_id, "level").len(), 2);
+
+        let erro = keyframe_remove(&mut doc, &track_id, 0, &filter_id, "level", 999).expect_err("não existe");
+        assert!(matches!(erro, ModelError::NotFound(_)));
+    }
+
+    #[test]
+    fn audio_set_level_e_normalize_usam_o_filtro_volume() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let producer_id = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a", 0, 99).expect("importa");
+        let track_id = add_track(&mut doc, "playlist0", TrackKind::Audio).expect("cria trilha");
+        add_clip_to_track(&mut doc, &track_id, &producer_id, 0, 99, 0).expect("posiciona");
+
+        let filter_id = audio_set_level(&mut doc, &track_id, 0, -6.0).expect("define nível");
+        assert_eq!(get_filter_param(&doc, &track_id, 0, &filter_id, "level"), Some("-6dB".to_string()));
+
+        // chamar de novo não deve criar um segundo filtro "volume"
+        audio_normalize(&mut doc, &track_id, 0, -12.0).expect("normaliza");
+        assert_eq!(list_filters(&doc, &track_id, 0).iter().filter(|(_, s)| s == "volume").count(), 1);
+    }
+
+    #[test]
+    fn set_clip_transform_repassa_rect_e_rotacao_para_o_qtblend() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let producer_id = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a", 0, 99).expect("importa");
+        let track_id = add_track(&mut doc, "playlist0", TrackKind::Video).expect("cria trilha");
+        add_clip_to_track(&mut doc, &track_id, &producer_id, 0, 99, 0).expect("posiciona");
+
+        let filter_id = set_clip_transform(&mut doc, &track_id, 0, 10.0, 20.0, 640.0, 360.0, Some(45.0)).expect("aplica transform");
+        assert_eq!(get_filter_param(&doc, &track_id, 0, &filter_id, "rect"), Some("10 20 640 360 1".to_string()));
+        assert_eq!(get_filter_param(&doc, &track_id, 0, &filter_id, "rotation"), Some("45".to_string()));
     }
 
     #[test]
