@@ -8,7 +8,7 @@ Servidor **MCP** (Model Context Protocol) em Rust que deixa um agente de IA **ed
 
 ## Vídeos de demonstração
 
-Os dois vídeos abaixo foram feitos por agentes de IA usando **apenas as ferramentas deste MCP**, sem editar nenhum arquivo à mão e sem material externo. Os dois estão sem som e ficam no YouTube, não no repositório, para ele continuar leve.
+Os vídeos abaixo foram feitos por agentes de IA usando **apenas as ferramentas deste MCP**, sem editar nenhum arquivo à mão e sem material externo. Eles ficam no YouTube, não no repositório, para ele continuar leve.
 
 ### Versão dinâmica, feita pelo Claude Opus 5.5
 
@@ -29,6 +29,16 @@ O script está em [examples/demo_video/construir_demo_dinamico.py](examples/demo
 **Este vídeo foi produzido pelo Claude Sonnet 5.5 usando apenas as ferramentas deste sistema**: cerca de 2.000 chamadas ao MCP (títulos, trilhas, clipes, transformações com keyframes, guias e render), sem editar nenhum arquivo à mão e sem material externo. Os exemplos são desenhados com títulos e retângulos animados. Cada uma das 16 cenas ilustra um grupo de ferramentas: visão geral, perfis de vídeo, biblioteca e timeline, edição de clipes, efeitos e keyframes, transições, velocidade e reverso, reenquadramento vertical, títulos e legendas, áudio e ducking, guias e marcadores, desfazer e refazer, render e presets, análise do resultado, integração com o Kdenlive aberto e encerramento.
 
 O script que montou o vídeo está em [examples/demo_video/](examples/demo_video/construir_demo.py) (um cliente MCP mínimo em Python mais as 16 cenas; leva ~15 s para montar o projeto e ~12 min para renderizar). A última cena do vídeo mostra 102 testes; hoje são 103. O vídeo foi conferido pelo próprio MCP antes do render, com `preview_frames` (folha de contato, uma imagem com um quadro de cada cena), e o projeto montado está em `.kdenlive`, aberto e editável no Kdenlive.
+
+### Versão vertical para Shorts e TikTok, feita pelo Claude Haiku 5.5
+
+[![Uma IA montou este vídeo vertical sozinha no Kdenlive (Haiku 5.5), no YouTube Shorts](https://i.ytimg.com/vi/3FXcWjukqZM/hqdefault.jpg)](https://youtube.com/shorts/3FXcWjukqZM)
+
+[**▶ Assistir no YouTube Shorts**](https://youtube.com/shorts/3FXcWjukqZM) (53 s, formato 9:16).
+
+**Este vídeo foi produzido pelo Claude Haiku 5.5** com o mesmo MCP: cerca de 760 chamadas, em 7 cenas. Mostra uma conversa em forma de chat entre o pedido e as respostas do agente, as ferramentas em fila, três números, uma timeline vertical, keyframes e um final com **criado pela [crom.run](https://crom.run)**.
+
+O script está em [examples/demo_video/construir_tiktok.py](examples/demo_video/construir_tiktok.py). Ele monta o projeto em ~1 s, e o render leva poucos minutos.
 
 ## O que dá para fazer
 
