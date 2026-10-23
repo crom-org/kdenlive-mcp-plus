@@ -65,6 +65,30 @@ fn programa_busctl() -> String {
 
 const MSG_DEMOROU: &str = "o busctl demorou demais para responder";
 
+/// O Claude Desktop (e outros clientes MCP) inicia o servidor só com `HOME`,
+/// `PATH`, `USER`, `LOGNAME` e `SHELL`: sem `DBUS_SESSION_BUS_ADDRESS` nem
+/// `XDG_RUNTIME_DIR` o `busctl --user` não acha o barramento da sessão. Nesse
+/// caso usamos o endereço padrão do systemd, `/run/user/<uid>/bus`, se o
+/// socket existir. `None` = o ambiente já basta (ou não há socket).
+fn endereco_padrao_do_barramento(
+    dbus_definido: bool,
+    runtime_dir_definido: bool,
+    uid: u32,
+    socket_existe: impl Fn(&str) -> bool,
+) -> Option<String> {
+    if dbus_definido || runtime_dir_definido {
+        return None;
+    }
+    let socket = format!("/run/user/{uid}/bus");
+    socket_existe(&socket).then(|| format!("unix:path={socket}"))
+}
+
+/// Dono do próprio processo (o uid do usuário), sem `unsafe`.
+fn uid_do_processo() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").ok().map(|m| m.uid())
+}
+
 /// Roda `busctl --user --json=short <args>` e devolve o stdout.
 async fn busctl(args: &[&str], limite: Duration) -> Result<String, String> {
     let mut comando = Command::new(programa_busctl());
@@ -75,6 +99,16 @@ async fn busctl(args: &[&str], limite: Duration) -> Result<String, String> {
         .args(args)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
+    if let Some(uid) = uid_do_processo()
+        && let Some(endereco) = endereco_padrao_do_barramento(
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some(),
+            std::env::var_os("XDG_RUNTIME_DIR").is_some(),
+            uid,
+            |socket| Path::new(socket).exists(),
+        )
+    {
+        comando.env("DBUS_SESSION_BUS_ADDRESS", endereco);
+    }
     let saida = tokio::time::timeout(limite, comando.output())
         .await
         .map_err(|_| MSG_DEMOROU.to_string())?
@@ -92,9 +126,19 @@ fn e_falta_de_resposta(erro: &str) -> bool {
     erro == MSG_DEMOROU || erro.contains("timed out") || erro.contains("Timeout")
 }
 
-/// Nomes de conexão (`:1.23`) da saída de `busctl list --json=short`. Os
-/// nomes bem conhecidos (`org.…`) são ignorados: o Kdenlive só tem garantia
-/// da conexão única, e uma conexão aparece em ambos.
+/// O processo é (provavelmente) um Kdenlive? O nome do processo no D-Bus é
+/// `kdenlive` (pacote, flatpak, snap) ou `AppRun.wrapped` (AppImage).
+/// Numa sessão de desktop há dezenas de conexões (cada uma que não responde
+/// custa o tempo limite da consulta), então só estas são consultadas.
+fn parece_kdenlive(processo: &str) -> bool {
+    let p = processo.to_lowercase();
+    p.contains("kdenlive") || p.starts_with("apprun")
+}
+
+/// Nomes de conexão (`:1.23`) de processos que parecem ser o Kdenlive, da
+/// saída de `busctl list --json=short`. Os nomes bem conhecidos (`org.…`)
+/// são ignorados: o Kdenlive só tem garantia da conexão única, e uma
+/// conexão aparece em ambos.
 pub fn parse_conexoes(json: &str) -> Vec<String> {
     let Ok(Value::Array(itens)) = serde_json::from_str::<Value>(json) else {
         return Vec::new();
@@ -102,11 +146,8 @@ pub fn parse_conexoes(json: &str) -> Vec<String> {
     let mut nomes: Vec<String> = Vec::new();
     for item in itens {
         let Some(nome) = item.get("name").and_then(Value::as_str) else { continue };
-        // a própria chamada ao busctl aparece na lista
-        if item.get("process").and_then(Value::as_str) == Some("busctl") {
-            continue;
-        }
-        if nome.starts_with(':') && !nomes.iter().any(|n| n == nome) {
+        let processo = item.get("process").and_then(Value::as_str).unwrap_or("");
+        if nome.starts_with(':') && parece_kdenlive(processo) && !nomes.iter().any(|n| n == nome) {
             nomes.push(nome.to_string());
         }
     }
@@ -240,17 +281,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn conexoes_ignoram_nomes_conhecidos_duplicatas_e_o_proprio_busctl() {
+    fn conexoes_so_de_processos_que_parecem_kdenlive_sem_duplicatas_nem_nomes_conhecidos() {
         let json = r#"[
             {"name":":1.0","pid":10,"process":"AppRun.wrapped","user":"j"},
             {"name":":1.9","pid":10,"process":"AppRun.wrapped","user":"j"},
             {"name":":1.9","pid":10,"process":"AppRun.wrapped","user":"j"},
+            {"name":":1.7","pid":11,"process":"kdenlive","user":"j"},
             {"name":":1.19","pid":99,"process":"busctl","user":"j"},
+            {"name":":1.20","pid":98,"process":"claude-desktop","user":"j"},
+            {"name":":1.21","pid":null,"process":null,"user":null},
             {"name":"org.freedesktop.DBus","pid":1,"process":"dbus-daemon","user":"j"},
             {"name":"org.kde.kdenlive-10","pid":null,"process":null,"user":null}
         ]"#;
-        assert_eq!(parse_conexoes(json), vec![":1.0".to_string(), ":1.9".to_string()]);
+        assert_eq!(parse_conexoes(json), vec![":1.0".to_string(), ":1.9".to_string(), ":1.7".to_string()]);
         assert!(parse_conexoes("isto não é json").is_empty());
+    }
+
+    #[test]
+    fn barramento_padrao_so_entra_quando_o_ambiente_nao_diz_onde_fica() {
+        let existe = |_: &str| true;
+        // o ambiente já diz: não mexe
+        assert_eq!(endereco_padrao_do_barramento(true, false, 1000, existe), None);
+        assert_eq!(endereco_padrao_do_barramento(false, true, 1000, existe), None);
+        // ambiente enxuto (Claude Desktop): usa o socket do systemd
+        assert_eq!(
+            endereco_padrao_do_barramento(false, false, 1000, existe),
+            Some("unix:path=/run/user/1000/bus".to_string())
+        );
+        // sem o socket, não inventa endereço
+        assert_eq!(endereco_padrao_do_barramento(false, false, 1000, |_| false), None);
     }
 
     #[test]
