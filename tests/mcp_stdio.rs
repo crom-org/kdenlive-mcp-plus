@@ -2221,3 +2221,22 @@ async fn preview_gif_e_export_render_de_um_trecho() {
     client.cancel().await.expect("fechamento limpo do cliente");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A especificação do MCP exige `"type": "object"` na raiz de todo `inputSchema` e
+/// `outputSchema`. O Claude Desktop valida isso com rigor (nas sessões do Cowork e
+/// do Code) e **recusa a lista inteira de ferramentas** se uma única fugir da regra.
+#[tokio::test]
+async fn todos_os_schemas_de_entrada_e_saida_sao_objetos() {
+    let client = iniciar_cliente().await;
+    let ferramentas = client.list_all_tools().await.expect("tools/list");
+    assert!(ferramentas.len() >= 90, "esperava todas as ferramentas, vieram {}", ferramentas.len());
+    for f in &ferramentas {
+        let entrada = serde_json::to_value(&*f.input_schema).expect("inputSchema");
+        assert_eq!(entrada["type"], Value::from("object"), "{}: inputSchema sem type=object: {entrada}", f.name);
+        if let Some(saida) = &f.output_schema {
+            let saida = serde_json::to_value(&**saida).expect("outputSchema");
+            assert_eq!(saida["type"], Value::from("object"), "{}: outputSchema sem type=object: {saida}", f.name);
+        }
+    }
+    client.cancel().await.expect("fechamento limpo do cliente");
+}

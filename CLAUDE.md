@@ -37,6 +37,7 @@ Rode a suíte com `cargo test -- --test-threads=1` e `cargo clippy --all-targets
 - Não escreva nada no stdout do processo quando ele estiver rodando em modo `mcp` — isso corrompe o transporte do protocolo. Logs vão para stderr.
 - Não adicione `unsafe` fora de `src/engine/`.
 - Não deixe um subprocesso de render (`render`/`frame`) sair pelo caminho normal do Rust: ele termina com `engine::encerrar_sem_limpeza` (`_exit`), porque o `atexit` do libmlt derruba o processo se uma thread de render ainda estiver no módulo Qt (D-046).
+- Não devolva `Json<serde_json::Value>` numa ferramenta: use `Json<Resposta>` (ou uma struct). Sem `type: "object"` no `outputSchema`, o Claude Desktop recusa a lista inteira de ferramentas (D-052).
 - Não gere um projeto sem nenhuma trilha: o Kdenlive 26 fecha ao abri-lo (D-044).
 - Não assuma que uma função FFI do libmlt teve sucesso sem checar o ponteiro/código de retorno contra nulo/erro.
 - Não invente uma versão, uma licença ou um número que não foi verificado nesta execução — escreva "a verificar" e diga como verificar (ver as pendências em [docs/decisoes.md](docs/decisoes.md)).

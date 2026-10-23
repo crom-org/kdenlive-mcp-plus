@@ -99,6 +99,31 @@ pub struct ServerInfoOutput {
     pub presets_disponiveis: Vec<String>,
 }
 
+/// Resposta JSON de uma ferramenta: sempre um objeto (`{"ok": ...}`). Existe
+/// só para o `outputSchema` anunciado no `tools/list` dizer `"type": "object"`,
+/// como a especificação do MCP exige — com `serde_json::Value` o schema saía sem
+/// `type`, e o Claude Desktop (sessões do Cowork e do Code) recusava a lista
+/// inteira de ferramentas.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct Resposta(pub Value);
+
+impl From<Value> for Resposta {
+    fn from(valor: Value) -> Self {
+        Self(valor)
+    }
+}
+
+impl JsonSchema for Resposta {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Resposta".into()
+    }
+
+    fn json_schema(_gerador: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "object", "additionalProperties": true })
+    }
+}
+
 /// Monta uma resposta de erro no formato padrão (`ok: false, erro: ...`).
 pub(crate) fn erro(mensagem: impl Into<String>) -> Value {
     json!({ "ok": false, "erro": mensagem.into() })
@@ -191,8 +216,8 @@ impl KdenliveMcpServer {
          crashes when it opens a project that has no tracks at all). Returns ok:true with the \
          project summary, or ok:false with an error listing valid profile names."
     )]
-    pub async fn project_new(&self, Parameters(params): Parameters<ProjectNewParams>) -> Json<Value> {
-        Json(self.project_new_impl(params).await)
+    pub async fn project_new(&self, Parameters(params): Parameters<ProjectNewParams>) -> Json<Resposta> {
+        Json(self.project_new_impl(params).await.into())
     }
 
     #[tool(
@@ -201,8 +226,8 @@ impl KdenliveMcpServer {
          Returns ok:true with a summary of what was loaded (profile, track count, bin clip \
          count), or ok:false with a Portuguese error message."
     )]
-    pub async fn project_open(&self, Parameters(params): Parameters<ProjectOpenParams>) -> Json<Value> {
-        Json(self.project_open_impl(params).await)
+    pub async fn project_open(&self, Parameters(params): Parameters<ProjectOpenParams>) -> Json<Resposta> {
+        Json(self.project_open_impl(params).await.into())
     }
 
     #[tool(
@@ -213,8 +238,8 @@ impl KdenliveMcpServer {
     pub async fn project_import_kdenlive(
         &self,
         Parameters(params): Parameters<ProjectOpenParams>,
-    ) -> Json<Value> {
-        Json(self.project_open_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.project_open_impl(params).await.into())
     }
 
     #[tool(
@@ -223,8 +248,8 @@ impl KdenliveMcpServer {
          an error if the project was never saved before and no path is given). Returns ok:true \
          with the path written, or ok:false with an error (e.g. no project open)."
     )]
-    pub async fn project_save(&self, Parameters(params): Parameters<ProjectSaveParams>) -> Json<Value> {
-        Json(self.project_save_impl(params).await)
+    pub async fn project_save(&self, Parameters(params): Parameters<ProjectSaveParams>) -> Json<Resposta> {
+        Json(self.project_save_impl(params).await.into())
     }
 
     #[tool(
@@ -232,8 +257,8 @@ impl KdenliveMcpServer {
          track count and kind, bin clip count, and total timeline duration in frames. Takes no \
          parameters. Returns ok:false if no project is open."
     )]
-    pub async fn project_get_info(&self) -> Json<Value> {
-        Json(self.project_get_info_impl().await)
+    pub async fn project_get_info(&self) -> Json<Resposta> {
+        Json(self.project_get_info_impl().await.into())
     }
 
     #[tool(
@@ -243,8 +268,8 @@ impl KdenliveMcpServer {
          ok:false if no project is open. This performs file-existence checks only; it never \
          calls the libmlt engine."
     )]
-    pub async fn project_validate(&self) -> Json<Value> {
-        Json(self.project_validate_impl().await)
+    pub async fn project_validate(&self) -> Json<Resposta> {
+        Json(self.project_validate_impl().await.into())
     }
 
     // -- Bin --------------------------------------------------------------
@@ -259,8 +284,8 @@ impl KdenliveMcpServer {
     pub async fn bin_import_clip(
         &self,
         Parameters(params): Parameters<BinImportClipParams>,
-    ) -> Json<Value> {
-        Json(self.bin_import_clip_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.bin_import_clip_impl(params).await.into())
     }
 
     #[tool(
@@ -268,8 +293,8 @@ impl KdenliveMcpServer {
          media path and frame range. Takes no parameters. Returns ok:false if no project is \
          open."
     )]
-    pub async fn bin_list_clips(&self) -> Json<Value> {
-        Json(self.bin_list_clips_impl().await)
+    pub async fn bin_list_clips(&self) -> Json<Resposta> {
+        Json(self.bin_list_clips_impl().await.into())
     }
 
     #[tool(
@@ -280,8 +305,8 @@ impl KdenliveMcpServer {
     pub async fn bin_get_clip_details(
         &self,
         Parameters(params): Parameters<BinClipIdParams>,
-    ) -> Json<Value> {
-        Json(self.bin_get_clip_details_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.bin_get_clip_details_impl(params).await.into())
     }
 
     #[tool(
@@ -290,8 +315,8 @@ impl KdenliveMcpServer {
          the track still references it). Parameter: clip_id (required). Returns ok:false if the \
          clip id is not found in the bin."
     )]
-    pub async fn bin_remove_clip(&self, Parameters(params): Parameters<BinClipIdParams>) -> Json<Value> {
-        Json(self.bin_remove_clip_impl(params).await)
+    pub async fn bin_remove_clip(&self, Parameters(params): Parameters<BinClipIdParams>) -> Json<Resposta> {
+        Json(self.bin_remove_clip_impl(params).await.into())
     }
 
     // -- Timeline -----------------------------------------------------------
@@ -304,8 +329,8 @@ impl KdenliveMcpServer {
     pub async fn timeline_add_track(
         &self,
         Parameters(params): Parameters<TimelineAddTrackParams>,
-    ) -> Json<Value> {
-        Json(self.timeline_add_track_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.timeline_add_track_impl(params).await.into())
     }
 
     #[tool(
@@ -316,8 +341,8 @@ impl KdenliveMcpServer {
     pub async fn timeline_remove_track(
         &self,
         Parameters(params): Parameters<TimelineRemoveTrackParams>,
-    ) -> Json<Value> {
-        Json(self.timeline_remove_track_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.timeline_remove_track_impl(params).await.into())
     }
 
     #[tool(
@@ -332,8 +357,8 @@ impl KdenliveMcpServer {
     pub async fn timeline_add_clip(
         &self,
         Parameters(params): Parameters<TimelineAddClipParams>,
-    ) -> Json<Value> {
-        Json(self.timeline_add_clip_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.timeline_add_clip_impl(params).await.into())
     }
 
     #[tool(
@@ -341,8 +366,8 @@ impl KdenliveMcpServer {
          (video/audio), clip count and total length in frames. Takes no parameters. Returns \
          ok:false if no project is open."
     )]
-    pub async fn timeline_list(&self) -> Json<Value> {
-        Json(self.timeline_list_impl().await)
+    pub async fn timeline_list(&self) -> Json<Resposta> {
+        Json(self.timeline_list_impl().await.into())
     }
 
     #[tool(
@@ -350,8 +375,8 @@ impl KdenliveMcpServer {
          id, in/out, position), total project duration in frames, and the video profile summary. \
          Takes no parameters. Returns ok:false if no project is open."
     )]
-    pub async fn timeline_get_info(&self) -> Json<Value> {
-        Json(self.timeline_get_info_impl().await)
+    pub async fn timeline_get_info(&self) -> Json<Resposta> {
+        Json(self.timeline_get_info_impl().await.into())
     }
 
     // -- Exportação e render --------------------------------------------------
@@ -362,8 +387,8 @@ impl KdenliveMcpServer {
          the XML text directly in the response instead). This does not change the session's \
          saved-to path (use project_save for that). Returns ok:false if no project is open."
     )]
-    pub async fn export_xml(&self, Parameters(params): Parameters<ExportXmlParams>) -> Json<Value> {
-        Json(self.export_xml_impl(params).await)
+    pub async fn export_xml(&self, Parameters(params): Parameters<ExportXmlParams>) -> Json<Resposta> {
+        Json(self.export_xml_impl(params).await.into())
     }
 
     #[tool(
@@ -371,8 +396,8 @@ impl KdenliveMcpServer {
          description of each, see server_info or the project documentation). Takes no \
          parameters."
     )]
-    pub async fn export_list_presets(&self) -> Json<Value> {
-        Json(json!({ "ok": true, "presets": preset::preset_names() }))
+    pub async fn export_list_presets(&self) -> Json<Resposta> {
+        Json(json!({ "ok": true, "presets": preset::preset_names() }).into())
     }
 
     #[tool(
@@ -393,8 +418,8 @@ impl KdenliveMcpServer {
     pub async fn export_render(
         &self,
         Parameters(params): Parameters<ExportRenderParams>,
-    ) -> Json<Value> {
-        Json(self.export_render_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.export_render_impl(params).await.into())
     }
 
     #[tool(
@@ -405,8 +430,8 @@ impl KdenliveMcpServer {
          job id is not known to this server (e.g. after a restart — job tracking does not \
          persist)."
     )]
-    pub async fn render_progress(&self, Parameters(params): Parameters<JobIdParams>) -> Json<Value> {
-        Json(self.render_progress_impl(params).await)
+    pub async fn render_progress(&self, Parameters(params): Parameters<JobIdParams>) -> Json<Resposta> {
+        Json(self.render_progress_impl(params).await.into())
     }
 
     #[tool(
@@ -416,8 +441,8 @@ impl KdenliveMcpServer {
          this project's own documentation). Parameter: job_id (required). Returns ok:false if \
          the job id is not found or is not currently running."
     )]
-    pub async fn render_cancel(&self, Parameters(params): Parameters<JobIdParams>) -> Json<Value> {
-        Json(self.render_cancel_impl(params).await)
+    pub async fn render_cancel(&self, Parameters(params): Parameters<JobIdParams>) -> Json<Resposta> {
+        Json(self.render_cancel_impl(params).await.into())
     }
 
     #[tool(
@@ -430,8 +455,8 @@ impl KdenliveMcpServer {
     pub async fn preview_frame(
         &self,
         Parameters(params): Parameters<PreviewFrameParams>,
-    ) -> Json<Value> {
-        Json(self.preview_frame_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.preview_frame_impl(params).await.into())
     }
 
     // -- Trilha (Fase 2) --------------------------------------------------
@@ -441,53 +466,53 @@ impl KdenliveMcpServer {
          locked/hidden/muted state, clip count and length in frames. Parameter: track_id \
          (required)."
     )]
-    pub async fn track_get_info(&self, Parameters(params): Parameters<TrackIdParams>) -> Json<Value> {
-        Json(self.track_get_info_impl(params).await)
+    pub async fn track_get_info(&self, Parameters(params): Parameters<TrackIdParams>) -> Json<Resposta> {
+        Json(self.track_get_info_impl(params).await.into())
     }
 
     #[tool(description = "Rename a track. Parameters: track_id, name (both required).")]
-    pub async fn track_set_name(&self, Parameters(params): Parameters<TrackSetNameParams>) -> Json<Value> {
-        Json(self.track_set_name_impl(params).await)
+    pub async fn track_set_name(&self, Parameters(params): Parameters<TrackSetNameParams>) -> Json<Resposta> {
+        Json(self.track_set_name_impl(params).await.into())
     }
 
     #[tool(
         description = "Lock/unlock a track (editing-only concept; does not affect rendering). \
          Parameters: track_id, value (both required)."
     )]
-    pub async fn track_set_locked(&self, Parameters(params): Parameters<TrackBoolParams>) -> Json<Value> {
-        Json(self.track_set_locked_impl(params).await)
+    pub async fn track_set_locked(&self, Parameters(params): Parameters<TrackBoolParams>) -> Json<Resposta> {
+        Json(self.track_set_locked_impl(params).await.into())
     }
 
     #[tool(
         description = "Hide/show a track's video, independently of its mute state. Parameters: \
          track_id, value (both required)."
     )]
-    pub async fn track_set_hidden(&self, Parameters(params): Parameters<TrackBoolParams>) -> Json<Value> {
-        Json(self.track_set_hidden_impl(params).await)
+    pub async fn track_set_hidden(&self, Parameters(params): Parameters<TrackBoolParams>) -> Json<Resposta> {
+        Json(self.track_set_hidden_impl(params).await.into())
     }
 
     #[tool(
         description = "Mute/unmute a track's audio, independently of its hidden state. \
          Parameters: track_id, value (both required)."
     )]
-    pub async fn track_set_muted(&self, Parameters(params): Parameters<TrackBoolParams>) -> Json<Value> {
-        Json(self.track_set_muted_impl(params).await)
+    pub async fn track_set_muted(&self, Parameters(params): Parameters<TrackBoolParams>) -> Json<Resposta> {
+        Json(self.track_set_muted_impl(params).await.into())
     }
 
     #[tool(
         description = "Move a track up one position (swap with the previous one). Parameter: \
          track_id (required). Returns ok:false if already the first track."
     )]
-    pub async fn track_move_up(&self, Parameters(params): Parameters<TrackIdParams>) -> Json<Value> {
-        Json(self.track_move_up_impl(params).await)
+    pub async fn track_move_up(&self, Parameters(params): Parameters<TrackIdParams>) -> Json<Resposta> {
+        Json(self.track_move_up_impl(params).await.into())
     }
 
     #[tool(
         description = "Move a track down one position (swap with the next one). Parameter: \
          track_id (required). Returns ok:false if already the last track."
     )]
-    pub async fn track_move_down(&self, Parameters(params): Parameters<TrackIdParams>) -> Json<Value> {
-        Json(self.track_move_down_impl(params).await)
+    pub async fn track_move_down(&self, Parameters(params): Parameters<TrackIdParams>) -> Json<Resposta> {
+        Json(self.track_move_down_impl(params).await.into())
     }
 
     // -- Clipe da timeline (Fase 2) -----------------------------------------
@@ -497,8 +522,8 @@ impl KdenliveMcpServer {
          whether it is reversed, and the list of filters attached to it. Parameter: clip_ref \
          (required, \"<track_id>:<index>\")."
     )]
-    pub async fn clip_get_properties(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Value> {
-        Json(self.clip_get_properties_impl(params).await)
+    pub async fn clip_get_properties(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Resposta> {
+        Json(self.clip_get_properties_impl(params).await.into())
     }
 
     #[tool(
@@ -509,8 +534,8 @@ impl KdenliveMcpServer {
          speed (both required). This only affects this specific clip instance, not the shared \
          bin producer or other placements of it."
     )]
-    pub async fn clip_set_speed(&self, Parameters(params): Parameters<ClipSetSpeedParams>) -> Json<Value> {
-        Json(self.clip_set_speed_impl(params).await)
+    pub async fn clip_set_speed(&self, Parameters(params): Parameters<ClipSetSpeedParams>) -> Json<Resposta> {
+        Json(self.clip_set_speed_impl(params).await.into())
     }
 
     #[tool(
@@ -518,8 +543,8 @@ impl KdenliveMcpServer {
          current speed; same underlying mechanism as clip_set_speed). Parameter: clip_ref \
          (required)."
     )]
-    pub async fn clip_reverse(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Value> {
-        Json(self.clip_reverse_impl(params).await)
+    pub async fn clip_reverse(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Resposta> {
+        Json(self.clip_reverse_impl(params).await.into())
     }
 
     #[tool(
@@ -527,8 +552,8 @@ impl KdenliveMcpServer {
          libmlt \"brightness\" filter's alpha parameter, attached to this specific clip (not \
          the shared producer). Parameters: clip_ref, opacity (both required)."
     )]
-    pub async fn clip_set_opacity(&self, Parameters(params): Parameters<ClipSetOpacityParams>) -> Json<Value> {
-        Json(self.clip_set_opacity_impl(params).await)
+    pub async fn clip_set_opacity(&self, Parameters(params): Parameters<ClipSetOpacityParams>) -> Json<Resposta> {
+        Json(self.clip_set_opacity_impl(params).await.into())
     }
 
     #[tool(
@@ -536,16 +561,16 @@ impl KdenliveMcpServer {
          #RRGGBB, e.g. \"#ff0000\"). Parameters: clip_id (the bin clip's id, required), color \
          (required)."
     )]
-    pub async fn clip_set_color(&self, Parameters(params): Parameters<BinClipColorParams>) -> Json<Value> {
-        Json(self.clip_set_color_impl(params).await)
+    pub async fn clip_set_color(&self, Parameters(params): Parameters<BinClipColorParams>) -> Json<Resposta> {
+        Json(self.clip_set_color_impl(params).await.into())
     }
 
     #[tool(
         description = "Set the description (free-text note) of a bin clip, shown in Kdenlive's \
          clip properties. Parameters: clip_id (the bin clip's id, required), note (required)."
     )]
-    pub async fn clip_add_note(&self, Parameters(params): Parameters<BinClipNoteParams>) -> Json<Value> {
-        Json(self.clip_add_note_impl(params).await)
+    pub async fn clip_add_note(&self, Parameters(params): Parameters<BinClipNoteParams>) -> Json<Resposta> {
+        Json(self.clip_add_note_impl(params).await.into())
     }
 
     // -- Sessão: undo/redo (Fase 2) ------------------------------------------
@@ -555,8 +580,8 @@ impl KdenliveMcpServer {
          50 history entries). Parameter: steps (optional, default 1). Unifies the original \
          catalog's session_undo/session_undo_step into one tool."
     )]
-    pub async fn session_undo(&self, Parameters(params): Parameters<SessionStepsParams>) -> Json<Value> {
-        Json(self.session_undo_impl(params).await)
+    pub async fn session_undo(&self, Parameters(params): Parameters<SessionStepsParams>) -> Json<Resposta> {
+        Json(self.session_undo_impl(params).await.into())
     }
 
     #[tool(
@@ -564,24 +589,24 @@ impl KdenliveMcpServer {
          default 1). Unifies the original catalog's session_redo/session_redo_step into one \
          tool. Any new edit after an undo clears the redo stack."
     )]
-    pub async fn session_redo(&self, Parameters(params): Parameters<SessionStepsParams>) -> Json<Value> {
-        Json(self.session_redo_impl(params).await)
+    pub async fn session_redo(&self, Parameters(params): Parameters<SessionStepsParams>) -> Json<Resposta> {
+        Json(self.session_redo_impl(params).await.into())
     }
 
     #[tool(
         description = "Report session state: whether a project is open, its modified flag, undo \
          history depth and redo steps available. Takes no parameters."
     )]
-    pub async fn session_status(&self) -> Json<Value> {
-        Json(self.session_status_impl().await)
+    pub async fn session_status(&self) -> Json<Resposta> {
+        Json(self.session_status_impl().await.into())
     }
 
     #[tool(
         description = "List all undo history entries, oldest first, with a short description of \
          each change. Takes no parameters. Returns ok:false if no project is open."
     )]
-    pub async fn session_history(&self) -> Json<Value> {
-        Json(self.session_history_impl().await)
+    pub async fn session_history(&self) -> Json<Resposta> {
+        Json(self.session_history_impl().await.into())
     }
 
     // -- Filtros (Fase 2) -----------------------------------------------------
@@ -593,26 +618,26 @@ impl KdenliveMcpServer {
          Returns ok:true with the new filter's id (unique within this clip, used by \
          filter_remove/filter_set_param)."
     )]
-    pub async fn filter_add(&self, Parameters(params): Parameters<FilterAddParams>) -> Json<Value> {
-        Json(self.filter_add_impl(params).await)
+    pub async fn filter_add(&self, Parameters(params): Parameters<FilterAddParams>) -> Json<Resposta> {
+        Json(self.filter_add_impl(params).await.into())
     }
 
     #[tool(description = "Detach a filter from a clip. Parameters: clip_ref, filter_id (both required).")]
-    pub async fn filter_remove(&self, Parameters(params): Parameters<FilterRemoveParams>) -> Json<Value> {
-        Json(self.filter_remove_impl(params).await)
+    pub async fn filter_remove(&self, Parameters(params): Parameters<FilterRemoveParams>) -> Json<Resposta> {
+        Json(self.filter_remove_impl(params).await.into())
     }
 
     #[tool(
         description = "Update a single parameter on an active filter. Parameters: clip_ref, \
          filter_id, param, value (all required, value as a string)."
     )]
-    pub async fn filter_set_param(&self, Parameters(params): Parameters<FilterSetParamParams>) -> Json<Value> {
-        Json(self.filter_set_param_impl(params).await)
+    pub async fn filter_set_param(&self, Parameters(params): Parameters<FilterSetParamParams>) -> Json<Resposta> {
+        Json(self.filter_set_param_impl(params).await.into())
     }
 
     #[tool(description = "List all active filters on a specific timeline clip. Parameter: clip_ref (required).")]
-    pub async fn filter_list(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Value> {
-        Json(self.filter_list_impl(params).await)
+    pub async fn filter_list(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Resposta> {
+        Json(self.filter_list_impl(params).await.into())
     }
 
     #[tool(
@@ -620,8 +645,8 @@ impl KdenliveMcpServer {
          \"melt -query filters\", a plain subprocess call — never the libmlt engine directly \
          from this server). Takes no parameters."
     )]
-    pub async fn filter_list_available(&self) -> Json<Value> {
-        Json(self.filter_list_available_impl().await)
+    pub async fn filter_list_available(&self) -> Json<Resposta> {
+        Json(self.filter_list_available_impl().await.into())
     }
 
     // -- Transições (Fase 2) ----------------------------------------------------
@@ -631,26 +656,26 @@ impl KdenliveMcpServer {
          crossfade/wipe) between two timeline tracks. Parameters: service, track_a, track_b (all \
          required, track ids as returned by timeline_add_track/timeline_list)."
     )]
-    pub async fn transition_add(&self, Parameters(params): Parameters<TransitionAddParams>) -> Json<Value> {
-        Json(self.transition_add_impl(params).await)
+    pub async fn transition_add(&self, Parameters(params): Parameters<TransitionAddParams>) -> Json<Resposta> {
+        Json(self.transition_add_impl(params).await.into())
     }
 
     #[tool(description = "Delete a transition by its id. Parameter: transition_id (required).")]
-    pub async fn transition_remove(&self, Parameters(params): Parameters<TransitionIdParams>) -> Json<Value> {
-        Json(self.transition_remove_impl(params).await)
+    pub async fn transition_remove(&self, Parameters(params): Parameters<TransitionIdParams>) -> Json<Resposta> {
+        Json(self.transition_remove_impl(params).await.into())
     }
 
     #[tool(
         description = "Modify a parameter on an existing transition. Parameters: transition_id, \
          param, value (all required, value as a string)."
     )]
-    pub async fn transition_set(&self, Parameters(params): Parameters<TransitionSetParamParams>) -> Json<Value> {
-        Json(self.transition_set_impl(params).await)
+    pub async fn transition_set(&self, Parameters(params): Parameters<TransitionSetParamParams>) -> Json<Resposta> {
+        Json(self.transition_set_impl(params).await.into())
     }
 
     #[tool(description = "List all transitions on the timeline. Takes no parameters.")]
-    pub async fn transition_list(&self) -> Json<Value> {
-        Json(self.transition_list_impl().await)
+    pub async fn transition_list(&self) -> Json<Resposta> {
+        Json(self.transition_list_impl().await.into())
     }
 
     // -- Guias e marcadores (Fase 2) ---------------------------------------------
@@ -659,23 +684,23 @@ impl KdenliveMcpServer {
         description = "Place a guide on the project timeline (shown in Kdenlive's timeline ruler \
          and guides list). Parameters: position (frames, required), comment (required)."
     )]
-    pub async fn guide_add(&self, Parameters(params): Parameters<GuideAddParams>) -> Json<Value> {
-        Json(self.guide_add_impl(params).await)
+    pub async fn guide_add(&self, Parameters(params): Parameters<GuideAddParams>) -> Json<Resposta> {
+        Json(self.guide_add_impl(params).await.into())
     }
 
     #[tool(description = "Delete a guide by id. Parameter: guide_id (required).")]
-    pub async fn guide_remove(&self, Parameters(params): Parameters<GuideIdParams>) -> Json<Value> {
-        Json(self.guide_remove_impl(params).await)
+    pub async fn guide_remove(&self, Parameters(params): Parameters<GuideIdParams>) -> Json<Resposta> {
+        Json(self.guide_remove_impl(params).await.into())
     }
 
     #[tool(description = "List all guide markers on the timeline. Takes no parameters.")]
-    pub async fn guide_list(&self) -> Json<Value> {
-        Json(self.guide_list_impl().await)
+    pub async fn guide_list(&self) -> Json<Resposta> {
+        Json(self.guide_list_impl().await.into())
     }
 
     #[tool(description = "Get a single guide by id. Parameter: guide_id (required).")]
-    pub async fn guide_get(&self, Parameters(params): Parameters<GuideIdParams>) -> Json<Value> {
-        Json(self.guide_get_impl(params).await)
+    pub async fn guide_get(&self, Parameters(params): Parameters<GuideIdParams>) -> Json<Resposta> {
+        Json(self.guide_get_impl(params).await.into())
     }
 
     #[tool(
@@ -683,8 +708,8 @@ impl KdenliveMcpServer {
          (required), position (optional), comment (optional; at least one of the two should be \
          given)."
     )]
-    pub async fn guide_update(&self, Parameters(params): Parameters<GuideUpdateParams>) -> Json<Value> {
-        Json(self.guide_update_impl(params).await)
+    pub async fn guide_update(&self, Parameters(params): Parameters<GuideUpdateParams>) -> Json<Resposta> {
+        Json(self.guide_update_impl(params).await.into())
     }
 
     #[tool(
@@ -694,18 +719,18 @@ impl KdenliveMcpServer {
          position (frames, required), comment (required), clip_ref (optional, \
          \"<track_id>:<index>\" or a bin clip id)."
     )]
-    pub async fn marker_add(&self, Parameters(params): Parameters<MarkerAddParams>) -> Json<Value> {
-        Json(self.marker_add_impl(params).await)
+    pub async fn marker_add(&self, Parameters(params): Parameters<MarkerAddParams>) -> Json<Resposta> {
+        Json(self.marker_add_impl(params).await.into())
     }
 
     #[tool(description = "List all markers (timeline and clip). Takes no parameters.")]
-    pub async fn marker_list(&self) -> Json<Value> {
-        Json(self.marker_list_impl().await)
+    pub async fn marker_list(&self) -> Json<Resposta> {
+        Json(self.marker_list_impl().await.into())
     }
 
     #[tool(description = "Remove a marker by id. Parameter: marker_id (required).")]
-    pub async fn marker_remove(&self, Parameters(params): Parameters<MarkerIdParams>) -> Json<Value> {
-        Json(self.marker_remove_impl(params).await)
+    pub async fn marker_remove(&self, Parameters(params): Parameters<MarkerIdParams>) -> Json<Resposta> {
+        Json(self.marker_remove_impl(params).await.into())
     }
 
     // -- Perfil do projeto (Fase 2) -----------------------------------------
@@ -715,16 +740,16 @@ impl KdenliveMcpServer {
          names — resolution, frame rate, aspect ratio — verified in this project's own \
          environment). Takes no parameters."
     )]
-    pub async fn project_list_profiles(&self) -> Json<Value> {
-        Json(self.project_list_profiles_impl().await)
+    pub async fn project_list_profiles(&self) -> Json<Resposta> {
+        Json(self.project_list_profiles_impl().await.into())
     }
 
     #[tool(
         description = "Get the current project's video profile (resolution, FPS, aspect ratio, \
          progressive). Takes no parameters. Returns ok:false if no project is open."
     )]
-    pub async fn project_get_profile(&self) -> Json<Value> {
-        Json(self.project_get_profile_impl().await)
+    pub async fn project_get_profile(&self) -> Json<Resposta> {
+        Json(self.project_get_profile_impl().await.into())
     }
 
     #[tool(
@@ -735,8 +760,8 @@ impl KdenliveMcpServer {
     pub async fn project_set_profile(
         &self,
         Parameters(params): Parameters<ProjectSetProfileParams>,
-    ) -> Json<Value> {
-        Json(self.project_set_profile_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.project_set_profile_impl(params).await.into())
     }
 
     // -- Bin: pastas, mover, renomear, importar pasta (Fase 2) ---------------
@@ -750,21 +775,21 @@ impl KdenliveMcpServer {
     pub async fn bin_create_folder(
         &self,
         Parameters(params): Parameters<BinCreateFolderParams>,
-    ) -> Json<Value> {
-        Json(self.bin_create_folder_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.bin_create_folder_impl(params).await.into())
     }
 
     #[tool(
         description = "Move a bin clip into a folder (or back to the root bin if folder_id is \
          omitted). Parameters: clip_id (required), folder_id (optional)."
     )]
-    pub async fn bin_move_clip(&self, Parameters(params): Parameters<BinMoveClipParams>) -> Json<Value> {
-        Json(self.bin_move_clip_impl(params).await)
+    pub async fn bin_move_clip(&self, Parameters(params): Parameters<BinMoveClipParams>) -> Json<Resposta> {
+        Json(self.bin_move_clip_impl(params).await.into())
     }
 
     #[tool(description = "Rename a bin clip. Parameters: clip_id, name (both required).")]
-    pub async fn bin_rename(&self, Parameters(params): Parameters<BinRenameParams>) -> Json<Value> {
-        Json(self.bin_rename_impl(params).await)
+    pub async fn bin_rename(&self, Parameters(params): Parameters<BinRenameParams>) -> Json<Resposta> {
+        Json(self.bin_rename_impl(params).await.into())
     }
 
     #[tool(
@@ -777,8 +802,8 @@ impl KdenliveMcpServer {
     pub async fn bin_import_folder(
         &self,
         Parameters(params): Parameters<BinImportFolderParams>,
-    ) -> Json<Value> {
-        Json(self.bin_import_folder_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.bin_import_folder_impl(params).await.into())
     }
 
     // -- Montagem em lote (Fase 2) -------------------------------------------
@@ -793,8 +818,8 @@ impl KdenliveMcpServer {
     pub async fn timeline_assemble_ranges(
         &self,
         Parameters(params): Parameters<TimelineAssembleRangesParams>,
-    ) -> Json<Value> {
-        Json(self.timeline_assemble_ranges_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.timeline_assemble_ranges_impl(params).await.into())
     }
 
     // -- Timeline: mover/aparar/dividir/remover clipe, posição/zoom (Fase 2) --
@@ -803,8 +828,8 @@ impl KdenliveMcpServer {
         description = "Delete a clip from the timeline (the slot becomes a blank, keeping \
          everything else in place). Parameter: clip_ref (required)."
     )]
-    pub async fn timeline_remove_clip(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Value> {
-        Json(self.timeline_remove_clip_impl(params).await)
+    pub async fn timeline_remove_clip(&self, Parameters(params): Parameters<ClipRefParams>) -> Json<Resposta> {
+        Json(self.timeline_remove_clip_impl(params).await.into())
     }
 
     #[tool(
@@ -816,8 +841,8 @@ impl KdenliveMcpServer {
     pub async fn timeline_move_clip(
         &self,
         Parameters(params): Parameters<TimelineMoveClipParams>,
-    ) -> Json<Value> {
-        Json(self.timeline_move_clip_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.timeline_move_clip_impl(params).await.into())
     }
 
     #[tool(
@@ -829,8 +854,8 @@ impl KdenliveMcpServer {
     pub async fn timeline_trim_clip(
         &self,
         Parameters(params): Parameters<TimelineTrimClipParams>,
-    ) -> Json<Value> {
-        Json(self.timeline_trim_clip_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.timeline_trim_clip_impl(params).await.into())
     }
 
     #[tool(
@@ -843,16 +868,16 @@ impl KdenliveMcpServer {
     pub async fn timeline_split_clip(
         &self,
         Parameters(params): Parameters<TimelineSplitClipParams>,
-    ) -> Json<Value> {
-        Json(self.timeline_split_clip_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.timeline_split_clip_impl(params).await.into())
     }
 
     #[tool(
         description = "Get total timeline duration in frames (the furthest end of any track). \
          Takes no parameters."
     )]
-    pub async fn timeline_get_duration(&self) -> Json<Value> {
-        Json(self.timeline_get_duration_impl().await)
+    pub async fn timeline_get_duration(&self) -> Json<Resposta> {
+        Json(self.timeline_get_duration_impl().await.into())
     }
 
     #[tool(
@@ -860,24 +885,24 @@ impl KdenliveMcpServer {
          only — there is no player in this headless server, so it has no effect on rendering; \
          it is just bookkeeping for the agent. Takes no parameters."
     )]
-    pub async fn timeline_get_position(&self) -> Json<Value> {
-        Json(self.timeline_get_position_impl().await)
+    pub async fn timeline_get_position(&self) -> Json<Resposta> {
+        Json(self.timeline_get_position_impl().await.into())
     }
 
     #[tool(
         description = "Set the playhead position (frames) — same session/UI-only bookkeeping as \
          timeline_get_position. Parameter: position (required, >= 0)."
     )]
-    pub async fn timeline_seek(&self, Parameters(params): Parameters<TimelineSeekParams>) -> Json<Value> {
-        Json(self.timeline_seek_impl(params).await)
+    pub async fn timeline_seek(&self, Parameters(params): Parameters<TimelineSeekParams>) -> Json<Resposta> {
+        Json(self.timeline_seek_impl(params).await.into())
     }
 
     #[tool(
         description = "Get the current timeline zoom level (0.1 .. 10.0). Session/UI-only \
          bookkeeping, no effect on rendering. Takes no parameters."
     )]
-    pub async fn timeline_get_zoom(&self) -> Json<Value> {
-        Json(self.timeline_get_zoom_impl().await)
+    pub async fn timeline_get_zoom(&self) -> Json<Resposta> {
+        Json(self.timeline_get_zoom_impl().await.into())
     }
 
     #[tool(
@@ -887,8 +912,8 @@ impl KdenliveMcpServer {
     pub async fn timeline_set_zoom(
         &self,
         Parameters(params): Parameters<TimelineSetZoomParams>,
-    ) -> Json<Value> {
-        Json(self.timeline_set_zoom_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.timeline_set_zoom_impl(params).await.into())
     }
 
     // -- Fila de render (Fase 2) ---------------------------------------------
@@ -903,21 +928,21 @@ impl KdenliveMcpServer {
     pub async fn render_queue_add(
         &self,
         Parameters(params): Parameters<RenderQueueAddParams>,
-    ) -> Json<Value> {
-        Json(self.render_queue_add_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.render_queue_add_impl(params).await.into())
     }
 
     #[tool(description = "List all render queue jobs (pending, running, done, failed or cancelled), in order. Takes no parameters.")]
-    pub async fn render_queue_list(&self) -> Json<Value> {
-        Json(self.render_queue_list_impl().await)
+    pub async fn render_queue_list(&self) -> Json<Resposta> {
+        Json(self.render_queue_list_impl().await.into())
     }
 
     #[tool(
         description = "Get render queue status: whether it is currently being processed, and a \
          count of jobs by status. Takes no parameters."
     )]
-    pub async fn render_queue_status(&self) -> Json<Value> {
-        Json(self.render_queue_status_impl().await)
+    pub async fn render_queue_status(&self) -> Json<Resposta> {
+        Json(self.render_queue_status_impl().await.into())
     }
 
     #[tool(
@@ -925,8 +950,8 @@ impl KdenliveMcpServer {
          one-render-at-a-time guarantee as export_render). Takes no parameters. Returns ok:false \
          if the queue is already being processed."
     )]
-    pub async fn render_queue_start(&self) -> Json<Value> {
-        Json(self.render_queue_start_impl().await)
+    pub async fn render_queue_start(&self) -> Json<Resposta> {
+        Json(self.render_queue_start_impl().await.into())
     }
 
     #[tool(
@@ -936,8 +961,8 @@ impl KdenliveMcpServer {
          jobs without starting them. Takes no parameters. Returns ok:false if the queue is not \
          currently being processed."
     )]
-    pub async fn render_queue_stop(&self) -> Json<Value> {
-        Json(self.render_queue_stop_impl().await)
+    pub async fn render_queue_stop(&self) -> Json<Resposta> {
+        Json(self.render_queue_stop_impl().await.into())
     }
 
     // -- Títulos (Fase 2) ----------------------------------------------------
@@ -951,8 +976,8 @@ impl KdenliveMcpServer {
          default opaque white \"0xffffffff\", format 0xRRGGBBAA). Place it on a track with \
          timeline_add_clip like any other bin clip."
     )]
-    pub async fn title_add(&self, Parameters(params): Parameters<TitleAddParams>) -> Json<Value> {
-        Json(self.title_add_impl(params).await)
+    pub async fn title_add(&self, Parameters(params): Parameters<TitleAddParams>) -> Json<Resposta> {
+        Json(self.title_add_impl(params).await.into())
     }
 
     #[tool(
@@ -961,8 +986,8 @@ impl KdenliveMcpServer {
          optional — only given fields are changed). Returns ok:false if clip_id is not a title \
          clip."
     )]
-    pub async fn title_update(&self, Parameters(params): Parameters<TitleUpdateParams>) -> Json<Value> {
-        Json(self.title_update_impl(params).await)
+    pub async fn title_update(&self, Parameters(params): Parameters<TitleUpdateParams>) -> Json<Resposta> {
+        Json(self.title_update_impl(params).await.into())
     }
 
     // -- Keyframes (Fase 2) --------------------------------------------------
@@ -974,16 +999,16 @@ impl KdenliveMcpServer {
          param, frame, value (all required; value as a string — the raw value the filter \
          expects at that keyframe). Replaces any existing keyframe at the same frame."
     )]
-    pub async fn keyframe_set(&self, Parameters(params): Parameters<KeyframeSetParams>) -> Json<Value> {
-        Json(self.keyframe_set_impl(params).await)
+    pub async fn keyframe_set(&self, Parameters(params): Parameters<KeyframeSetParams>) -> Json<Resposta> {
+        Json(self.keyframe_set_impl(params).await.into())
     }
 
     #[tool(
         description = "List the keyframes of a filter parameter, in frame order. Parameters: \
          clip_ref, filter_id, param (all required)."
     )]
-    pub async fn keyframe_list(&self, Parameters(params): Parameters<KeyframeListParams>) -> Json<Value> {
-        Json(self.keyframe_list_impl(params).await)
+    pub async fn keyframe_list(&self, Parameters(params): Parameters<KeyframeListParams>) -> Json<Resposta> {
+        Json(self.keyframe_list_impl(params).await.into())
     }
 
     #[tool(
@@ -991,8 +1016,8 @@ impl KdenliveMcpServer {
          filter_id, param, frame (all required). Returns ok:false if there is no keyframe at \
          that exact frame."
     )]
-    pub async fn keyframe_remove(&self, Parameters(params): Parameters<KeyframeRemoveParams>) -> Json<Value> {
-        Json(self.keyframe_remove_impl(params).await)
+    pub async fn keyframe_remove(&self, Parameters(params): Parameters<KeyframeRemoveParams>) -> Json<Resposta> {
+        Json(self.keyframe_remove_impl(params).await.into())
     }
 
     // -- Legendas (Fase 2) -----------------------------------------------------
@@ -1008,8 +1033,8 @@ impl KdenliveMcpServer {
     pub async fn subtitle_import_srt(
         &self,
         Parameters(params): Parameters<SubtitleImportSrtParams>,
-    ) -> Json<Value> {
-        Json(self.subtitle_import_srt_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.subtitle_import_srt_impl(params).await.into())
     }
 
     #[tool(
@@ -1021,8 +1046,8 @@ impl KdenliveMcpServer {
     pub async fn subtitle_export_srt(
         &self,
         Parameters(params): Parameters<SubtitleExportSrtParams>,
-    ) -> Json<Value> {
-        Json(self.subtitle_export_srt_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.subtitle_export_srt_impl(params).await.into())
     }
 
     // -- Áudio (Fase 2) --------------------------------------------------------
@@ -1035,8 +1060,8 @@ impl KdenliveMcpServer {
     pub async fn audio_set_levels(
         &self,
         Parameters(params): Parameters<AudioSetLevelsParams>,
-    ) -> Json<Value> {
-        Json(self.audio_set_levels_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.audio_set_levels_impl(params).await.into())
     }
 
     #[tool(
@@ -1047,8 +1072,8 @@ impl KdenliveMcpServer {
     pub async fn audio_normalize(
         &self,
         Parameters(params): Parameters<AudioNormalizeParams>,
-    ) -> Json<Value> {
-        Json(self.audio_normalize_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.audio_normalize_impl(params).await.into())
     }
 
     // -- Transformação (Fase 2) --------------------------------------------------
@@ -1068,8 +1093,8 @@ impl KdenliveMcpServer {
          preview_gif for motion and export_render with start_frame/end_frame to render only a \
          part as video."
     )]
-    pub async fn preview_frames(&self, Parameters(params): Parameters<PreviewFramesParams>) -> Json<Value> {
-        Json(self.preview_frames_impl(params).await)
+    pub async fn preview_frames(&self, Parameters(params): Parameters<PreviewFramesParams>) -> Json<Resposta> {
+        Json(self.preview_frames_impl(params).await.into())
     }
 
     #[tool(
@@ -1083,8 +1108,8 @@ impl KdenliveMcpServer {
          project_path (optional, default the open project). At most 150 frames. Returns the GIF \
          path, size, the frames used and its duration."
     )]
-    pub async fn preview_gif(&self, Parameters(params): Parameters<PreviewGifParams>) -> Json<Value> {
-        Json(self.preview_gif_impl(params).await)
+    pub async fn preview_gif(&self, Parameters(params): Parameters<PreviewGifParams>) -> Json<Resposta> {
+        Json(self.preview_gif_impl(params).await.into())
     }
 
     #[tool(
@@ -1102,8 +1127,8 @@ impl KdenliveMcpServer {
          0.5) tune that detection. Returns the speech intervals (timeline frames) and, per target \
          clip, the filter id and the keyframes (clip-local frame, dB)."
     )]
-    pub async fn audio_duck(&self, Parameters(params): Parameters<AudioDuckParams>) -> Json<Value> {
-        Json(self.audio_duck_impl(params).await)
+    pub async fn audio_duck(&self, Parameters(params): Parameters<AudioDuckParams>) -> Json<Resposta> {
+        Json(self.audio_duck_impl(params).await.into())
     }
 
     #[tool(
@@ -1120,8 +1145,8 @@ impl KdenliveMcpServer {
     pub async fn clip_reframe_vertical(
         &self,
         Parameters(params): Parameters<ClipReframeVerticalParams>,
-    ) -> Json<Value> {
-        Json(self.clip_reframe_vertical_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.clip_reframe_vertical_impl(params).await.into())
     }
 
     #[tool(
@@ -1139,8 +1164,8 @@ impl KdenliveMcpServer {
     pub async fn clip_set_transform(
         &self,
         Parameters(params): Parameters<ClipSetTransformParams>,
-    ) -> Json<Value> {
-        Json(self.clip_set_transform_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.clip_set_transform_impl(params).await.into())
     }
 
     // -- Miniatura (Fase 2) -----------------------------------------------------
@@ -1155,8 +1180,8 @@ impl KdenliveMcpServer {
     pub async fn export_thumbnail(
         &self,
         Parameters(params): Parameters<ExportThumbnailParams>,
-    ) -> Json<Value> {
-        Json(self.export_thumbnail_impl(params).await)
+    ) -> Json<Resposta> {
+        Json(self.export_thumbnail_impl(params).await.into())
     }
 }
 
