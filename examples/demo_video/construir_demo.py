@@ -1,7 +1,7 @@
 """Monta o vídeo de demonstração do kdenlive-mcp-plus SÓ com chamadas ao MCP (stdio).
 
 Este é o script que o Claude Sonnet 5.5 usou para produzir o vídeo
-`docs/demo/demonstracao-capacidades.mp4`: cerca de 2.000 chamadas às ferramentas do
+publicado no YouTube (https://www.youtube.com/watch?v=TK5J5h2BuKY): cerca de 2.000 chamadas às ferramentas do
 servidor (títulos, trilhas, clipes, transformações com keyframes, guias), sem editar
 nenhum arquivo à mão e sem mídia externa.
 

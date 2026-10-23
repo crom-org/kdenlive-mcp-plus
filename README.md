@@ -6,9 +6,23 @@ Servidor **MCP** (Model Context Protocol) em Rust que deixa um agente de IA **ed
 
 > **kdenlive-mcp-plus** é um nome provisório, e a licença do projeto ainda está pendente de decisão. Ver [docs/decisoes.md](docs/decisoes.md) (D-008 e D-009).
 
-## Vídeo de demonstração
+## Vídeos de demonstração
 
-[**▶ Assistir à demonstração de tudo o que o sistema faz**](docs/demo/demonstracao-capacidades.mp4) (3 min 37 s, sem som).
+Os dois vídeos abaixo foram feitos por agentes de IA usando **apenas as ferramentas deste MCP**, sem editar nenhum arquivo à mão e sem material externo. Os dois estão sem som e ficam no YouTube, não no repositório, para ele continuar leve.
+
+### Versão dinâmica, feita pelo Claude Opus 5.5
+
+Link do YouTube em breve (1 min 38 s, sem som).
+
+**Este vídeo foi produzido pelo Claude Opus 5.5**: cerca de 4.700 chamadas ao MCP, em 16 cenas mais curtas e rápidas. Tem palavras em sequência, entradas com "estalo" (o elemento passa do ponto e volta), cortinas coloridas entre as cenas, barras de áudio que pulsam e abaixam no ducking, uma barra de progresso do vídeo inteiro e, em cada cena, as ferramentas MCP usadas. Termina com **criado pela [crom.run](https://crom.run)**.
+
+O script está em [examples/demo_video/construir_demo_dinamico.py](examples/demo_video/construir_demo_dinamico.py). Ele reaproveita o cliente MCP e a base do script do Sonnet e leva ~16 s para montar o projeto e ~8 min para renderizar. Antes do render, o Opus conferiu o vídeo com `preview_frames`, o que mostrou um erro de camadas: textos ficavam escondidos atrás das faixas. O script corrige isso pondo cada elemento novo numa trilha acima do que já está na tela.
+
+### Versão completa, feita pelo Claude Sonnet 5.5
+
+[![Uma IA editou este vídeo sozinha no Kdenlive (Sonnet 5.5), no YouTube](https://i.ytimg.com/vi/TK5J5h2BuKY/hqdefault.jpg)](https://www.youtube.com/watch?v=TK5J5h2BuKY)
+
+[**▶ Assistir no YouTube**](https://www.youtube.com/watch?v=TK5J5h2BuKY) (3 min 37 s, sem som).
 
 **Este vídeo foi produzido pelo Claude Sonnet 5.5 usando apenas as ferramentas deste sistema**: cerca de 2.000 chamadas ao MCP (títulos, trilhas, clipes, transformações com keyframes, guias e render), sem editar nenhum arquivo à mão e sem material externo. Os exemplos são desenhados com títulos e retângulos animados. Cada uma das 16 cenas ilustra um grupo de ferramentas: visão geral, perfis de vídeo, biblioteca e timeline, edição de clipes, efeitos e keyframes, transições, velocidade e reverso, reenquadramento vertical, títulos e legendas, áudio e ducking, guias e marcadores, desfazer e refazer, render e presets, análise do resultado, integração com o Kdenlive aberto e encerramento.
 
