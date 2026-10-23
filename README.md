@@ -12,7 +12,9 @@ Os dois vídeos abaixo foram feitos por agentes de IA usando **apenas as ferrame
 
 ### Versão dinâmica, feita pelo Claude Opus 5.5
 
-Link do YouTube em breve (1 min 38 s, sem som).
+[![Uma IA editou este vídeo sozinha no Kdenlive (Opus 5.5), no YouTube](https://i.ytimg.com/vi/-v83eXFuRwI/hqdefault.jpg)](https://youtu.be/-v83eXFuRwI)
+
+[**▶ Assistir no YouTube**](https://youtu.be/-v83eXFuRwI) (1 min 38 s, sem som).
 
 **Este vídeo foi produzido pelo Claude Opus 5.5**: cerca de 4.700 chamadas ao MCP, em 16 cenas mais curtas e rápidas. Tem palavras em sequência, entradas com "estalo" (o elemento passa do ponto e volta), cortinas coloridas entre as cenas, barras de áudio que pulsam e abaixam no ducking, uma barra de progresso do vídeo inteiro e, em cada cena, as ferramentas MCP usadas. Termina com **criado pela [crom.run](https://crom.run)**.
 
