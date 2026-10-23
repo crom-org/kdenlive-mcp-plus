@@ -24,7 +24,7 @@ fn parse_kind(texto: &str) -> Result<TrackKind, Value> {
 fn track_json(doc: &xmltree::Element, track_id: &str) -> Value {
     let kind = document::track_kind(doc, track_id);
     let clipes = document::list_clips(doc, track_id);
-    let comprimento = document::find_playlist(doc, track_id)
+    let comprimento = document::find_track_playlist(doc, track_id)
         .map(document::track_length)
         .unwrap_or(0);
     json!({

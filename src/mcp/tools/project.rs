@@ -145,7 +145,7 @@ fn validar_documento(doc: &xmltree::Element) -> Value {
     }
 
     for track_id in document::track_ids(doc) {
-        let vazio = document::find_playlist(doc, &track_id)
+        let vazio = document::find_track_playlist(doc, &track_id)
             .map(|p| document::list_clips(doc, &track_id).is_empty() && document::track_length(p) == 0)
             .unwrap_or(true);
         if vazio {

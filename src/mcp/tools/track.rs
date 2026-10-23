@@ -8,7 +8,7 @@ use crate::mcp::server::{KdenliveMcpServer, erro};
 use crate::model::document::{self, TrackKind};
 
 fn track_info_json(doc: &xmltree::Element, track_id: &str) -> Option<Value> {
-    if document::track_kind(doc, track_id).is_none() && document::find_playlist(doc, track_id).is_none() {
+    if document::track_kind(doc, track_id).is_none() && document::find_track_playlist(doc, track_id).is_none() {
         return None;
     }
     let (oculta, muda) = document::track_hidden_muted(doc, track_id).unwrap_or((false, false));
@@ -21,7 +21,7 @@ fn track_info_json(doc: &xmltree::Element, track_id: &str) -> Option<Value> {
         "oculta": oculta,
         "muda": muda,
         "quantidade_clipes": clipes.len(),
-        "comprimento_quadros": document::find_playlist(doc, track_id).map(document::track_length).unwrap_or(0),
+        "comprimento_quadros": document::find_track_playlist(doc, track_id).map(document::track_length).unwrap_or(0),
     }))
 }
 
