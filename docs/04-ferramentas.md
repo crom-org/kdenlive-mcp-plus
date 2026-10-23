@@ -4,7 +4,7 @@ Ver também: [visão](01-visao.md) · [arquitetura](02-arquitetura.md) · [roadm
 
 Regra do projeto (princípio 3 em [docs/01-visao.md](01-visao.md)): uma ferramenta só aparece no `tools/list` do servidor MCP quando está **implementada e testada** (status `testada` nesta tabela). Toda ferramenta `planejada` existe só nesta documentação.
 
-**Estado atual: catálogo completo.** 93 ferramentas no `tools/list`, todas `testada`, cobertas por 102 testes automatizados (72 unitários, 23 de integração via protocolo MCP real, 3 de presets e 4 de render). As duas que tinham ficado `planejada` (`clip_reframe_vertical` e `audio_duck`) foram implementadas e verificadas medindo o resultado (D-045 e D-047 em [decisões](decisoes.md)).
+**Estado atual: catálogo completo.** 93 ferramentas no `tools/list`, todas `testada`, cobertas por 103 testes automatizados (72 unitários, 24 de integração via protocolo MCP real, 3 de presets e 4 de render). As duas que tinham ficado `planejada` (`clip_reframe_vertical` e `audio_duck`) foram implementadas e verificadas medindo o resultado (D-045 e D-047 em [decisões](decisoes.md)).
 
 ## Ferramentas desta execução, fora dos catálogos herdado/novo (Fase 0)
 

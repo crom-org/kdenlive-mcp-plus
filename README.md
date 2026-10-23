@@ -2,7 +2,7 @@
 
 Servidor **MCP** (Model Context Protocol) em Rust que deixa um agente de IA **editar vídeo de verdade**: projeto, biblioteca de mídia, trilhas, clipes, efeitos com keyframes, transições, títulos, legendas, áudio, guias, histórico de desfazer e render final. Tudo **sem interface gráfica**, salvando no **formato nativo do Kdenlive** (`.kdenlive`, XML do MLT) e renderizando com o **libmlt**, o mesmo motor do Kdenlive. Com o Kdenlive aberto, você acompanha o vídeo sendo montado: ele recarrega sozinho a cada edição.
 
-93 ferramentas, 102 testes automatizados.
+93 ferramentas, 103 testes automatizados.
 
 > **kdenlive-mcp-plus** é um nome provisório, e a licença do projeto ainda está pendente de decisão. Ver [docs/decisoes.md](docs/decisoes.md) (D-008 e D-009).
 
@@ -12,7 +12,7 @@ Servidor **MCP** (Model Context Protocol) em Rust que deixa um agente de IA **ed
 
 **Este vídeo foi produzido pelo Claude Sonnet 5.5 usando apenas as ferramentas deste sistema**: cerca de 2.000 chamadas ao MCP (títulos, trilhas, clipes, transformações com keyframes, guias e render), sem editar nenhum arquivo à mão e sem material externo. Os exemplos são desenhados com títulos e retângulos animados. Cada uma das 16 cenas ilustra um grupo de ferramentas: visão geral, perfis de vídeo, biblioteca e timeline, edição de clipes, efeitos e keyframes, transições, velocidade e reverso, reenquadramento vertical, títulos e legendas, áudio e ducking, guias e marcadores, desfazer e refazer, render e presets, análise do resultado, integração com o Kdenlive aberto e encerramento.
 
-O vídeo foi conferido pelo próprio MCP antes do render, com `preview_frames` (folha de contato, uma imagem com um quadro de cada cena), e o projeto montado está em `.kdenlive`, aberto e editável no Kdenlive.
+O script que montou o vídeo está em [examples/demo_video/](examples/demo_video/construir_demo.py) (um cliente MCP mínimo em Python mais as 16 cenas; leva ~15 s para montar o projeto e ~12 min para renderizar). A última cena do vídeo mostra 102 testes; hoje são 103. O vídeo foi conferido pelo próprio MCP antes do render, com `preview_frames` (folha de contato, uma imagem com um quadro de cada cena), e o projeto montado está em `.kdenlive`, aberto e editável no Kdenlive.
 
 ## O que dá para fazer
 
@@ -266,7 +266,7 @@ cargo test -- --test-threads=1
 cargo clippy --all-targets -- -D warnings
 ```
 
-102 testes: unitários (modelo, formato, geometria do reenquadramento, aritmética do ducking), contrato MCP real via stdio, e verificações de resultado: o reenquadramento é conferido **nos pixels** do quadro renderizado, o ducking **medindo o áudio renderizado**, e o recarregamento do Kdenlive contra um `busctl` falso (e, manualmente, contra o Kdenlive 26.04.1 e o 23.08.5 reais). Os testes que usam `ffmpeg` são ignorados se ele faltar.
+103 testes: unitários (modelo, formato, geometria do reenquadramento, aritmética do ducking), contrato MCP real via stdio, e verificações de resultado: o reenquadramento é conferido **nos pixels** do quadro renderizado, o ducking **medindo o áudio renderizado**, e o recarregamento do Kdenlive contra um `busctl` falso (e, manualmente, contra o Kdenlive 26.04.1 e o 23.08.5 reais). Os testes que usam `ffmpeg` são ignorados se ele faltar.
 
 ## Limitações conhecidas
 
