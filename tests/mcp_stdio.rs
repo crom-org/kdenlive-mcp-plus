@@ -93,6 +93,7 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "audio_duck",
             "audio_normalize",
             "audio_set_levels",
+            "bin_add_color_clip",
             "bin_create_folder",
             "bin_get_clip_details",
             "bin_import_clip",
@@ -102,6 +103,8 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "bin_remove_clip",
             "bin_rename",
             "clip_add_note",
+            "clip_animate_transform",
+            "clip_fade",
             "clip_get_properties",
             "clip_reframe_vertical",
             "clip_reverse",
@@ -123,9 +126,13 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "guide_list",
             "guide_remove",
             "guide_update",
+            "kdenlive_live",
+            "kdenlive_open",
+            "kdenlive_reload",
             "keyframe_list",
             "keyframe_remove",
             "keyframe_set",
+            "keyframe_set_many",
             "marker_add",
             "marker_list",
             "marker_remove",
@@ -156,6 +163,8 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "subtitle_export_srt",
             "subtitle_import_srt",
             "timeline_add_clip",
+            "timeline_add_clip_loop",
+            "timeline_add_clips",
             "timeline_add_track",
             "timeline_assemble_ranges",
             "timeline_get_duration",
@@ -2239,4 +2248,455 @@ async fn todos_os_schemas_de_entrada_e_saida_sao_objetos() {
         }
     }
     client.cancel().await.expect("fechamento limpo do cliente");
+}
+
+// ---------------------------------------------------------------------------
+// Recursos novos (D-053 a D-060): composições com intervalo, fades,
+// transformação animada, keyframes em lote, imagem e cor, áudio ligado, lote,
+// loop, rótulos das trilhas, estilo de título e o Kdenlive ao vivo.
+// ---------------------------------------------------------------------------
+
+fn diretorio_teste(nome: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_{nome}_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+    dir
+}
+
+async fn cor(client: &RunningService<rmcp::RoleClient, ()>, cor: &str, quadros: i64) -> String {
+    let r = chamar(client, "bin_add_color_clip", serde_json::json!({ "color": cor, "duration_frames": quadros })).await;
+    assert_ok(&r, "bin_add_color_clip");
+    r["clip_id"].as_str().expect("clip_id").to_string()
+}
+
+async fn pos(client: &RunningService<rmcp::RoleClient, ()>, trilha: &str, clip: &str, a: i64, b: i64, p: i64) -> Value {
+    let r = chamar(
+        client,
+        "timeline_add_clip",
+        serde_json::json!({ "track_id": trilha, "producer_id": clip, "in_frame": a, "out_frame": b, "position": p }),
+    )
+    .await;
+    assert_ok(&r, "timeline_add_clip");
+    r
+}
+
+async fn quadro_png(client: &RunningService<rmcp::RoleClient, ()>, dir: &std::path::Path, quadro: i64) -> PathBuf {
+    let png = dir.join(format!("q{quadro}.png"));
+    assert_ok(
+        &chamar(client, "preview_frame", serde_json::json!({ "frame": quadro, "output_path": png.to_string_lossy(), "overwrite": true })).await,
+        "preview_frame",
+    );
+    png
+}
+
+/// Dissolve de verdade entre dois clipes sobrepostos, com a transição só no
+/// trecho da sobreposição: antes vermelho, no meio uma mistura, depois azul.
+#[tokio::test]
+async fn transicao_com_intervalo_faz_dissolve_entre_clipes_sobrepostos() {
+    if !tem_ffmpeg() {
+        eprintln!("ffmpeg não encontrado: teste ignorado");
+        return;
+    }
+    let dir = diretorio_teste("dissolve");
+    let client = iniciar_cliente_sem_tela().await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    let cima = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "video" })).await;
+    let cima = cima["track_id"].as_str().expect("track_id").to_string();
+    let (vermelho, azul) = (cor(&client, "#ff0000", 50).await, cor(&client, "#0000ff", 50).await);
+    pos(&client, "track0", &vermelho, 0, 49, 0).await;
+    pos(&client, &cima, &azul, 0, 49, 30).await;
+
+    let erro_intervalo = chamar(
+        &client,
+        "transition_add",
+        serde_json::json!({ "service": "luma", "track_a": "track0", "track_b": cima, "in_frame": 30 }),
+    )
+    .await;
+    assert_eq!(erro_intervalo["ok"], Value::Bool(false), "só in_frame, sem out_frame, é erro: {erro_intervalo}");
+
+    let t = chamar(
+        &client,
+        "transition_add",
+        serde_json::json!({ "service": "luma", "track_a": "track0", "track_b": cima, "in_frame": 30, "out_frame": 49 }),
+    )
+    .await;
+    assert_ok(&t, "transition_add com intervalo");
+    let lista = chamar(&client, "transition_list", serde_json::json!({})).await;
+    assert_eq!(lista["transicoes"][0]["in_frame"], Value::from(30), "{lista}");
+    assert_eq!(lista["transicoes"][0]["out_frame"], Value::from(49), "{lista}");
+
+    assert!(e_vermelho(pixel(&quadro_png(&client, &dir, 20).await, 960, 540)), "antes da sobreposição: vermelho");
+    let meio = pixel(&quadro_png(&client, &dir, 40).await, 960, 540);
+    assert!(meio.0 > 60 && meio.2 > 60, "no meio do dissolve, vermelho e azul misturados: {meio:?}");
+    assert!(e_azul(pixel(&quadro_png(&client, &dir, 60).await, 960, 540)), "depois do dissolve: azul");
+
+    let salvo = dir.join("dissolve.kdenlive");
+    assert_ok(&chamar(&client, "project_save", serde_json::json!({ "path": salvo.to_string_lossy() })).await, "project_save");
+    let xml = std::fs::read_to_string(&salvo).expect("lê o projeto");
+    assert!(xml.contains(r#"<property name="kdenlive_id">dissolve</property>"#), "luma vira a composição dissolve do Kdenlive");
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `clip_fade`: do preto (vídeo), por transparência sobre a trilha de baixo,
+/// e de áudio (efeitos fadein/fadeout do Kdenlive), mais os erros.
+#[tokio::test]
+async fn clip_fade_do_preto_por_transparencia_e_de_audio() {
+    if !tem_ffmpeg() {
+        eprintln!("ffmpeg não encontrado: teste ignorado");
+        return;
+    }
+    let dir = diretorio_teste("fade");
+    let client = iniciar_cliente_sem_tela().await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    let cima = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "video" })).await;
+    let cima = cima["track_id"].as_str().expect("track_id").to_string();
+    let (vermelho, azul) = (cor(&client, "#ff0000", 200).await, cor(&client, "#0000ff", 100).await);
+    // clipe que começa no quadro 100 da mídia: o fade tem de valer no clipe, não na mídia
+    pos(&client, "track0", &vermelho, 100, 149, 0).await;
+    let f = chamar(
+        &client,
+        "clip_fade",
+        serde_json::json!({ "clip_ref": "track0:0", "kind": "in", "duration_frames": 20, "mode": "black" }),
+    )
+    .await;
+    assert_ok(&f, "clip_fade in black");
+    assert_eq!(f["efeito_kdenlive"], Value::from("fade_from_black"));
+    assert!(e_preto(pixel(&quadro_png(&client, &dir, 0).await, 960, 540)), "quadro 0 do fade do preto: preto");
+    let meio = pixel(&quadro_png(&client, &dir, 10).await, 960, 540);
+    assert!(meio.0 > 60 && meio.0 < 200, "no meio do fade, vermelho escurecido: {meio:?}");
+    assert!(e_vermelho(pixel(&quadro_png(&client, &dir, 30).await, 960, 540)), "depois do fade: vermelho");
+
+    // por transparência: o vermelho de cima some e aparece o azul de baixo
+    pos(&client, "track0", &azul, 0, 49, 50).await;
+    pos(&client, &cima, &vermelho, 0, 49, 50).await;
+    let f = chamar(
+        &client,
+        "clip_fade",
+        serde_json::json!({ "clip_ref": format!("{cima}:1"), "kind": "out", "duration_frames": 20 }),
+    )
+    .await;
+    assert_ok(&f, "clip_fade out alpha");
+    assert!(e_vermelho(pixel(&quadro_png(&client, &dir, 60).await, 960, 540)), "antes do fade de saída: vermelho por cima");
+    assert!(e_azul(pixel(&quadro_png(&client, &dir, 99).await, 960, 540)), "no fim do fade por transparência: o azul de baixo");
+
+    let erro_grande = chamar(&client, "clip_fade", serde_json::json!({ "clip_ref": "track0:0", "kind": "in", "duration_frames": 500 })).await;
+    assert_eq!(erro_grande["ok"], Value::Bool(false), "fade maior que o clipe é erro: {erro_grande}");
+    let erro_kind = chamar(&client, "clip_fade", serde_json::json!({ "clip_ref": "track0:0", "kind": "meio", "duration_frames": 5 })).await;
+    assert_eq!(erro_kind["ok"], Value::Bool(false), "kind inválido é erro: {erro_kind}");
+
+    // áudio: volume com os ids do Kdenlive
+    let wav = dir.join("tom.wav");
+    let ok = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=2"])
+        .arg(&wav)
+        .status()
+        .expect("ffmpeg");
+    assert!(ok.success());
+    let audio = chamar(&client, "bin_import_clip", serde_json::json!({ "path": wav.to_string_lossy() })).await;
+    let audio = audio["clip_id"].as_str().expect("clip_id").to_string();
+    pos(&client, "track1", &audio, 0, 49, 0).await;
+    let fa = chamar(&client, "clip_fade", serde_json::json!({ "clip_ref": "track1:0", "kind": "out", "duration_frames": 25 })).await;
+    assert_ok(&fa, "clip_fade de áudio");
+    assert_eq!(fa["efeito_kdenlive"], Value::from("fadeout"));
+    let salvo = dir.join("fade.kdenlive");
+    assert_ok(&chamar(&client, "project_save", serde_json::json!({ "path": salvo.to_string_lossy() })).await, "project_save");
+    let xml = std::fs::read_to_string(&salvo).expect("lê o projeto");
+    assert!(xml.contains(r#"<filter id="filter0" in="25" out="49">"#), "fade de áudio só no fim do clipe:\n{xml}");
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `clip_animate_transform` move um bloco pela tela (quadros relativos ao
+/// clipe, mesmo com o clipe começando no meio da mídia), e `keyframe_set_many`
+/// grava vários keyframes numa chamada.
+#[tokio::test]
+async fn clip_animate_transform_move_o_clipe_e_keyframe_set_many_grava_em_lote() {
+    if !tem_ffmpeg() {
+        eprintln!("ffmpeg não encontrado: teste ignorado");
+        return;
+    }
+    let dir = diretorio_teste("anima");
+    let client = iniciar_cliente_sem_tela().await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    let vermelho = cor(&client, "#ff0000", 200).await;
+    pos(&client, "track0", &vermelho, 100, 140, 0).await;
+    let a = chamar(
+        &client,
+        "clip_animate_transform",
+        serde_json::json!({
+            "clip_ref": "track0:0",
+            "keyframes": [
+                { "frame": 0, "x": 0, "y": 0, "width": 400, "height": 400 },
+                { "frame": 40, "x": 1520, "y": 680, "width": 400, "height": 400 }
+            ]
+        }),
+    )
+    .await;
+    assert_ok(&a, "clip_animate_transform");
+    let q0 = quadro_png(&client, &dir, 0).await;
+    assert!(e_vermelho(pixel(&q0, 200, 200)), "quadro 0: o bloco está no canto de cima");
+    assert!(e_preto(pixel(&q0, 1720, 880)), "quadro 0: o canto de baixo está vazio");
+    let q40 = quadro_png(&client, &dir, 40).await;
+    assert!(e_vermelho(pixel(&q40, 1720, 880)), "quadro 40: o bloco chegou ao canto de baixo");
+    assert!(e_preto(pixel(&q40, 200, 200)), "quadro 40: o canto de cima ficou vazio");
+
+    let fora = chamar(
+        &client,
+        "clip_animate_transform",
+        serde_json::json!({ "clip_ref": "track0:0", "keyframes": [{ "frame": 99, "x": 0, "y": 0, "width": 10, "height": 10 }] }),
+    )
+    .await;
+    assert_eq!(fora["ok"], Value::Bool(false), "keyframe fora do clipe é erro: {fora}");
+
+    let filtro = chamar(&client, "filter_add", serde_json::json!({ "clip_ref": "track0:0", "service": "brightness" })).await;
+    let filtro = filtro["filter_id"].as_str().expect("filter_id").to_string();
+    let m = chamar(
+        &client,
+        "keyframe_set_many",
+        serde_json::json!({
+            "clip_ref": "track0:0", "filter_id": filtro, "param": "level", "relative_to_clip": true,
+            "keyframes": [{ "frame": 0, "value": "0" }, { "frame": 10, "value": "1" }, { "frame": 20, "value": "0.5" }]
+        }),
+    )
+    .await;
+    assert_ok(&m, "keyframe_set_many");
+    assert_eq!(m["total_keyframes"], Value::from(3));
+    let lista = chamar(&client, "keyframe_list", serde_json::json!({ "clip_ref": "track0:0", "filter_id": filtro, "param": "level" })).await;
+    let quadros: Vec<i64> = lista["keyframes"].as_array().expect("keyframes").iter().map(|k| k["frame"].as_i64().expect("frame")).collect();
+    assert_eq!(quadros, vec![100, 110, 120], "relative_to_clip soma o in do clipe (100)");
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Imagem parada com duração (e esticável), clipe de cor, lote tudo-ou-nada,
+/// loop e os rótulos V1/A1 do Kdenlive.
+#[tokio::test]
+async fn imagem_cor_lote_loop_e_rotulos_das_trilhas() {
+    if !tem_ffmpeg() {
+        eprintln!("ffmpeg não encontrado: teste ignorado");
+        return;
+    }
+    let dir = diretorio_teste("imagem");
+    let client = iniciar_cliente_sem_tela().await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    let png = dir.join("azul.png");
+    let ok = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x180", "-frames:v", "1"])
+        .arg(&png)
+        .status()
+        .expect("ffmpeg");
+    assert!(ok.success());
+    let img = chamar(&client, "bin_import_clip", serde_json::json!({ "path": png.to_string_lossy(), "duration_frames": 30 })).await;
+    assert_ok(&img, "bin_import_clip de imagem");
+    assert_eq!(img["out_frame"], Value::from(29));
+    let img = img["clip_id"].as_str().expect("clip_id").to_string();
+    pos(&client, "track0", &img, 0, 59, 0).await; // esticada além dos 30 quadros
+    assert!(e_azul(pixel(&quadro_png(&client, &dir, 50).await, 960, 540)), "a imagem esticada aparece no quadro 50");
+
+    let invalida = chamar(&client, "bin_add_color_clip", serde_json::json!({ "color": "azul", "duration_frames": 10 })).await;
+    assert_eq!(invalida["ok"], Value::Bool(false), "cor inválida é erro: {invalida}");
+
+    let verde = cor(&client, "#00ff00", 10).await;
+    let falha = chamar(
+        &client,
+        "timeline_add_clips",
+        serde_json::json!({ "clips": [
+            { "track_id": "track0", "producer_id": verde, "in_frame": 0, "out_frame": 9, "position": 100 },
+            { "track_id": "track0", "producer_id": "nao_existe", "in_frame": 0, "out_frame": 9, "position": 200 }
+        ]}),
+    )
+    .await;
+    assert_eq!(falha["ok"], Value::Bool(false), "um clipe inválido faz o lote falhar: {falha}");
+    let info = chamar(&client, "timeline_get_info", serde_json::json!({})).await;
+    let v1 = info["trilhas"].as_array().expect("trilhas").iter().find(|t| t["track_id"] == "track0").cloned().expect("track0");
+    assert_eq!(v1["quantidade_clipes"], Value::from(1), "tudo ou nada: nenhum clipe do lote ficou: {v1}");
+    let lote = chamar(
+        &client,
+        "timeline_add_clips",
+        serde_json::json!({ "clips": [
+            { "track_id": "track0", "producer_id": verde, "in_frame": 0, "out_frame": 9, "position": 100 },
+            { "track_id": "track0", "producer_id": verde, "in_frame": 0, "out_frame": 9, "position": 120 }
+        ]}),
+    )
+    .await;
+    assert_ok(&lote, "timeline_add_clips");
+    assert_eq!(lote["clip_refs"].as_array().expect("clip_refs").len(), 2);
+
+    let laco = chamar(
+        &client,
+        "timeline_add_clip_loop",
+        serde_json::json!({ "track_id": "track0", "producer_id": verde, "position": 200, "duration_frames": 25, "start_offset": 3 }),
+    )
+    .await;
+    assert_ok(&laco, "timeline_add_clip_loop");
+    assert_eq!(laco["ranges"], serde_json::json!([[3, 9], [0, 9], [0, 7]]));
+
+    let v2 = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "video" })).await;
+    let a2 = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "audio" })).await;
+    let info = chamar(&client, "timeline_get_info", serde_json::json!({})).await;
+    let rotulo = |id: &str| {
+        info["trilhas"].as_array().expect("trilhas").iter().find(|t| t["track_id"] == id).map(|t| t["rotulo_kdenlive"].clone())
+    };
+    assert_eq!(rotulo("track0"), Some(Value::from("V1")));
+    assert_eq!(rotulo(v2["track_id"].as_str().expect("id")), Some(Value::from("V2")));
+    assert_eq!(rotulo(a2["track_id"].as_str().expect("id")), Some(Value::from("A1")), "a última trilha de áudio criada fica logo abaixo do vídeo");
+    assert_eq!(rotulo("track1"), Some(Value::from("A2")));
+    let validacao = chamar(&client, "project_validate", serde_json::json!({})).await;
+    let problemas = validacao["problemas"].to_string();
+    assert!(!problemas.contains("não existe"), "clipe de cor não é arquivo e não pode ser acusado: {problemas}");
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Vídeo com som: `audio_track_id` põe o som numa trilha de áudio, agrupado
+/// com o vídeo (grupo AVSplit do Kdenlive). Trilha que não é de áudio é erro.
+#[tokio::test]
+async fn timeline_add_clip_com_audio_ligado_agrupa_video_e_audio() {
+    if !tem_ffmpeg() {
+        eprintln!("ffmpeg não encontrado: teste ignorado");
+        return;
+    }
+    let dir = diretorio_teste("av");
+    let mp4 = dir.join("av.mp4");
+    let ok = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x180:r=25:d=2", "-f", "lavfi", "-i", "sine=f=440:d=2", "-shortest"])
+        .arg(&mp4)
+        .status()
+        .expect("ffmpeg");
+    assert!(ok.success());
+    let client = iniciar_cliente().await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    let clip = chamar(&client, "bin_import_clip", serde_json::json!({ "path": mp4.to_string_lossy() })).await;
+    let clip = clip["clip_id"].as_str().expect("clip_id").to_string();
+    let errado = chamar(
+        &client,
+        "timeline_add_clip",
+        serde_json::json!({ "track_id": "track0", "producer_id": clip, "in_frame": 0, "out_frame": 24, "position": 0, "audio_track_id": "track0" }),
+    )
+    .await;
+    assert_eq!(errado["ok"], Value::Bool(false), "audio_track_id precisa ser de áudio: {errado}");
+    let r = chamar(
+        &client,
+        "timeline_add_clip",
+        serde_json::json!({ "track_id": "track0", "producer_id": clip, "in_frame": 0, "out_frame": 24, "position": 10, "audio_track_id": "track1" }),
+    )
+    .await;
+    assert_ok(&r, "timeline_add_clip com áudio");
+    assert_eq!(r["audio_clip_ref"], Value::from("track1:1"), "{r}");
+    let salvo = dir.join("av.kdenlive");
+    assert_ok(&chamar(&client, "project_save", serde_json::json!({ "path": salvo.to_string_lossy() })).await, "project_save");
+    let xml = std::fs::read_to_string(&salvo).expect("lê o projeto");
+    assert!(xml.contains("AVSplit"), "grupo vídeo+áudio gravado na sequência");
+    assert!(xml.contains(":10:-1"), "folhas do grupo na posição 10");
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Título com caixa de fundo, contorno, negrito e posição: a caixa aparece
+/// no render e os atributos do titulador do Kdenlive estão no `xmldata`.
+#[tokio::test]
+async fn title_add_com_caixa_de_fundo_contorno_e_posicao() {
+    if !tem_ffmpeg() {
+        eprintln!("ffmpeg não encontrado: teste ignorado");
+        return;
+    }
+    let dir = diretorio_teste("titulo_estilo");
+    let client = iniciar_cliente_sem_tela().await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    let t = chamar(
+        &client,
+        "title_add",
+        serde_json::json!({
+            "text": "TESTE DE CAIXA", "duration_frames": 25, "font_family": "DejaVu Sans", "font_size": 60,
+            "color": "#ffffff", "bold": true, "y": 300, "outline_width": 3, "outline_color": "#000000",
+            "background_color": "#ff0000", "padding": 30
+        }),
+    )
+    .await;
+    assert_ok(&t, "title_add com estilo");
+    let id = t["clip_id"].as_str().expect("clip_id").to_string();
+    pos(&client, "track0", &id, 0, 24, 0).await;
+    let png = quadro_png(&client, &dir, 5).await;
+    // folga de 30 px acima da caixa de texto (centro y=300, altura 84): y ~ 245 é caixa vermelha
+    assert!(e_vermelho(pixel(&png, 960, 243)), "caixa de fundo vermelha acima do texto: {:?}", pixel(&png, 960, 243));
+    assert!(e_preto(pixel(&png, 960, 700)), "longe do título, o fundo continua preto");
+    let errado = chamar(&client, "title_add", serde_json::json!({ "text": "x", "duration_frames": 5, "align": "diagonal" })).await;
+    assert_eq!(errado["ok"], Value::Bool(false), "align inválido é erro: {errado}");
+    let salvo = dir.join("titulo.kdenlive");
+    assert_ok(&chamar(&client, "project_save", serde_json::json!({ "path": salvo.to_string_lossy() })).await, "project_save");
+    let xml = std::fs::read_to_string(&salvo).expect("lê o projeto");
+    // o xmldata é XML dentro de uma propriedade: compara sem depender de como as aspas foram escapadas
+    let xml = xml.replace("&quot;", "\"").replace("&#34;", "\"");
+    for trecho in ["QGraphicsRectItem", r#"font-outline="3""#, r#"font-weight="700""#, r#"brushcolor="255,0,0,255""#] {
+        assert!(xml.contains(trecho), "esperava {trecho} no xmldata do título");
+    }
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `kdenlive_live` liga e desliga o acompanhamento ao vivo em plena sessão,
+/// `kdenlive_reload` recarrega uma vez, `kdenlive_open` abre o programa (um
+/// falso, aqui) quando nenhum Kdenlive mostra o projeto.
+#[tokio::test]
+async fn kdenlive_live_reload_e_open_controlam_o_kdenlive_aberto() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = diretorio_teste("ao_vivo_ferramentas");
+    let log = dir.join("busctl.log");
+    let falso = busctl_falso(&dir, &log, false, 0);
+    let aberto = dir.join("aberto.txt");
+    let kdenlive_falso = dir.join("kdenlive_falso.sh");
+    std::fs::write(&kdenlive_falso, format!("#!/bin/bash\necho \"$1\" > \"{}\"\n", aberto.display())).expect("grava");
+    std::fs::set_permissions(&kdenlive_falso, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let client = iniciar_cliente_com_env(&[
+        ("KDENLIVE_MCP_BUSCTL", &falso.to_string_lossy()),
+        ("KDENLIVE_MCP_KDENLIVE", &kdenlive_falso.to_string_lossy()),
+    ])
+    .await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    let sem_caminho = chamar(&client, "kdenlive_reload", serde_json::json!({})).await;
+    assert_eq!(sem_caminho["ok"], Value::Bool(false), "sem projeto salvo é erro: {sem_caminho}");
+    let alvo = dir.join("ao_vivo.kdenlive");
+    assert_ok(&chamar(&client, "project_save", serde_json::json!({ "path": alvo.to_string_lossy() })).await, "project_save");
+    let info = chamar(&client, "server_info", serde_json::json!({})).await;
+    assert_eq!(info["autoreload"], Value::Bool(false), "desligado por padrão: {info}");
+
+    assert_ok(&chamar(&client, "kdenlive_live", serde_json::json!({ "enabled": true })).await, "kdenlive_live on");
+    let texto = esperar_log(&log, |t| t.contains(CHAMADA_REVERT)).await;
+    assert!(texto.contains(CHAMADA_REVERT), "ligar já recarrega; log:\n{texto}");
+    let antes = texto.matches(CHAMADA_REVERT).count();
+    assert_ok(&chamar(&client, "guide_add", serde_json::json!({ "position": 5, "comment": "ao vivo" })).await, "guide_add");
+    let texto = esperar_log(&log, |t| t.matches(CHAMADA_REVERT).count() > antes).await;
+    assert!(texto.matches(CHAMADA_REVERT).count() > antes, "a edição recarrega de novo; log:\n{texto}");
+    let info = chamar(&client, "server_info", serde_json::json!({})).await;
+    assert_eq!(info["autoreload"], Value::Bool(true), "{info}");
+    assert_ok(&chamar(&client, "kdenlive_live", serde_json::json!({ "enabled": false })).await, "kdenlive_live off");
+    let info = chamar(&client, "server_info", serde_json::json!({})).await;
+    assert_eq!(info["autoreload"], Value::Bool(false), "{info}");
+    assert_eq!(info["autosave"], Value::Bool(false), "{info}");
+
+    let recarga = chamar(&client, "kdenlive_reload", serde_json::json!({})).await;
+    assert_ok(&recarga, "kdenlive_reload");
+    assert_eq!(recarga["resultado"], Value::from("recarregado"), "{recarga}");
+
+    let ja = chamar(&client, "kdenlive_open", serde_json::json!({})).await;
+    assert_ok(&ja, "kdenlive_open de projeto já aberto");
+    assert_eq!(ja["ja_aberto"], Value::Bool(true), "{ja}");
+    let outro = dir.join("outro.kdenlive");
+    std::fs::copy(&alvo, &outro).expect("copia");
+    let abriu = chamar(&client, "kdenlive_open", serde_json::json!({ "path": outro.to_string_lossy() })).await;
+    assert_ok(&abriu, "kdenlive_open");
+    assert_eq!(abriu["ja_aberto"], Value::Bool(false), "{abriu}");
+    for _ in 0..50 {
+        if aberto.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let argumento = std::fs::read_to_string(&aberto).expect("o Kdenlive falso foi chamado");
+    assert_eq!(argumento.trim(), outro.to_string_lossy(), "abre o projeto pedido");
+    let inexistente = chamar(&client, "kdenlive_open", serde_json::json!({ "path": "/nao/existe.kdenlive" })).await;
+    assert_eq!(inexistente["ok"], Value::Bool(false), "{inexistente}");
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
 }

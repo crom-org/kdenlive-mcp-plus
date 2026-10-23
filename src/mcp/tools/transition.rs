@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use crate::mcp::params::{TransitionAddParams, TransitionIdParams, TransitionSetParamParams};
-use crate::mcp::server::KdenliveMcpServer;
+use crate::mcp::server::{KdenliveMcpServer, erro};
 use crate::model::document;
 
 impl KdenliveMcpServer {
@@ -13,10 +13,17 @@ impl KdenliveMcpServer {
             "adicionar transição \"{}\" entre \"{}\" e \"{}\"",
             params.service, params.track_a, params.track_b
         );
+        let range = match (params.in_frame, params.out_frame) {
+            (Some(i), Some(o)) => Some((i, o)),
+            (None, None) => None,
+            _ => return erro("informe in_frame e out_frame juntos (ou nenhum dos dois, para a timeline inteira)"),
+        };
+        let extras: Vec<(String, String)> = params.params.clone().unwrap_or_default().into_iter().collect();
         let resultado = self
             .with_session_mut(|session| {
                 session.snapshot_before(descricao);
-                let id = document::add_transition(&mut session.doc, &params.service, &params.track_a, &params.track_b)?;
+                let opcoes = document::TransitionOptions { range, kdenlive_id: params.kdenlive_id.as_deref(), params: &extras };
+                let id = document::add_transition(&mut session.doc, &params.service, &params.track_a, &params.track_b, &opcoes)?;
                 session.mark_modified();
                 Ok(id)
             })
@@ -28,6 +35,8 @@ impl KdenliveMcpServer {
                 "service": params.service,
                 "track_a": params.track_a,
                 "track_b": params.track_b,
+                "in_frame": range.map(|r| r.0),
+                "out_frame": range.map(|r| r.1),
             }),
             Err(valor_erro) => valor_erro,
         }
@@ -78,7 +87,15 @@ impl KdenliveMcpServer {
             .with_session(|session| {
                 document::list_transitions(&session.doc)
                     .into_iter()
-                    .map(|(id, servico)| json!({ "transition_id": id, "service": servico }))
+                    .map(|(id, servico)| {
+                        let intervalo = document::transition_range(&session.doc, &id);
+                        json!({
+                            "transition_id": id,
+                            "service": servico,
+                            "in_frame": intervalo.map(|r| r.0),
+                            "out_frame": intervalo.map(|r| r.1),
+                        })
+                    })
                     .collect::<Vec<_>>()
             })
             .await;

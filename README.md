@@ -2,7 +2,7 @@
 
 Servidor **MCP** (Model Context Protocol) em Rust que deixa um agente de IA **editar vídeo de verdade**: projeto, biblioteca de mídia, trilhas, clipes, efeitos com keyframes, transições, títulos, legendas, áudio, guias, histórico de desfazer e render final. Tudo **sem interface gráfica**, salvando no **formato nativo do Kdenlive** (`.kdenlive`, XML do MLT) e renderizando com o **libmlt**, o mesmo motor do Kdenlive. Com o Kdenlive aberto, você acompanha o vídeo sendo montado: ele recarrega sozinho a cada edição.
 
-93 ferramentas, 103 testes automatizados.
+101 ferramentas, 116 testes automatizados.
 
 > **kdenlive-mcp-plus** é um nome provisório, e a licença do projeto ainda está pendente de decisão. Ver [docs/decisoes.md](docs/decisoes.md) (D-008 e D-009).
 
@@ -57,7 +57,7 @@ O script está em [examples/demo_video/construir_tiktok.py](examples/demo_video/
 
 ## Ferramentas
 
-Todas as 93 têm teste automatizado. A descrição completa de cada uma (parâmetros, retorno, origem, fase) está em [docs/04-ferramentas.md](docs/04-ferramentas.md); o agente também as recebe com descrição em inglês pelo protocolo.
+Todas as 101 têm teste automatizado. A descrição completa de cada uma (parâmetros, retorno, origem, fase) está em [docs/04-ferramentas.md](docs/04-ferramentas.md); o agente também as recebe com descrição em inglês pelo protocolo.
 
 ### Servidor e projeto
 
@@ -78,7 +78,8 @@ Todas as 93 têm teste automatizado. A descrição completa de cada uma (parâme
 
 | Ferramenta | O que faz |
 |---|---|
-| `bin_import_clip` | Importa um arquivo de mídia para a bin. |
+| `bin_import_clip` | Importa um arquivo de mídia para a bin (imagens paradas com a duração que você pedir). |
+| `bin_add_color_clip` | Cria um clipe de cor sólida (ex. fundo preto), esticável na timeline. |
 | `bin_import_folder` | Importa uma pasta inteira. |
 | `bin_list_clips` | Lista os itens da bin. |
 | `bin_get_clip_details` | Detalhes de um item (arquivo, duração, nota, cor). |
@@ -95,14 +96,16 @@ Todas as 93 têm teste automatizado. A descrição completa de cada uma (parâme
 |---|---|
 | `timeline_add_track` | Adiciona uma trilha de vídeo ou de áudio. |
 | `timeline_remove_track` | Remove uma trilha e seus clipes. |
-| `timeline_add_clip` | Coloca um item da bin numa trilha, numa posição, com ponto de entrada e de saída. |
+| `timeline_add_clip` | Coloca um item da bin numa trilha, numa posição, com ponto de entrada e de saída; com `audio_track_id`, o som do vídeo vai junto, ligado, numa trilha de áudio. |
+| `timeline_add_clips` | Vários clipes numa chamada só (tudo ou nada). |
+| `timeline_add_clip_loop` | Preenche uma duração repetindo um clipe (loop de fundo animado, por exemplo). |
 | `timeline_move_clip` | Muda a posição de um clipe. |
 | `timeline_trim_clip` | Ajusta os pontos de entrada e saída. |
 | `timeline_split_clip` | Divide um clipe em dois. |
 | `timeline_remove_clip` | Remove um clipe da timeline. |
 | `timeline_assemble_ranges` | Monta uma sequência a partir de intervalos de um clipe, numa chamada só. |
 | `timeline_list` | Trilhas com seus clipes, bloqueio, silêncio. |
-| `timeline_get_info` | Visão completa: trilhas, clipes, duração, posição, zoom, guias. |
+| `timeline_get_info` | Visão completa: trilhas (com o rótulo V1/A1 que o Kdenlive mostra), clipes, duração, posição, zoom, guias. |
 | `timeline_get_duration` | Duração total. |
 | `timeline_get_position` / `timeline_seek` | Posição do cursor (ler e mover). |
 | `timeline_get_zoom` / `timeline_set_zoom` | Zoom da timeline (ler e ajustar). |
@@ -122,6 +125,8 @@ Todas as 93 têm teste automatizado. A descrição completa de cada uma (parâme
 | `clip_reverse` | Inverte o sentido da reprodução. |
 | `clip_set_opacity` | Opacidade de 0 a 1. |
 | `clip_set_transform` | Posição, escala e rotação (filtro `qtblend`, o "Transform" do Kdenlive). |
+| `clip_animate_transform` | Anima posição, tamanho, opacidade e rotação com vários keyframes numa chamada (zoom, slide, "pop", fade por opacidade). |
+| `clip_fade` | Fade de entrada ou saída, de vídeo (por transparência ou do preto) ou de áudio, com os efeitos de fade do próprio Kdenlive. |
 | `clip_reframe_vertical` | Reenquadra um clipe para o quadro vertical (9:16), `fill` ou `fit`, com foco ajustável. |
 
 ### Filtros, keyframes e transições
@@ -134,9 +139,10 @@ Todas as 93 têm teste automatizado. A descrição completa de cada uma (parâme
 | `filter_set_param` | Altera um parâmetro de um filtro. |
 | `filter_remove` | Remove um filtro. |
 | `keyframe_set` | Valor de um parâmetro num quadro (animado, com interpolação). |
+| `keyframe_set_many` | Vários keyframes de um parâmetro numa chamada só. |
 | `keyframe_list` | Keyframes de um parâmetro. |
 | `keyframe_remove` | Remove um keyframe. |
-| `transition_add` | Transição entre duas trilhas (`luma`, `composite`...). |
+| `transition_add` | Transição entre duas trilhas (`luma`, `composite`...), na timeline inteira ou só num intervalo (`in_frame`/`out_frame`): é assim que se faz um dissolve ou um wipe entre dois clipes sobrepostos. |
 | `transition_set` | Altera um parâmetro da transição. |
 | `transition_list` | Lista as transições. |
 | `transition_remove` | Remove uma transição. |
@@ -145,7 +151,7 @@ Todas as 93 têm teste automatizado. A descrição completa de cada uma (parâme
 
 | Ferramenta | O que faz |
 |---|---|
-| `title_add` | Cria um título nativo do Kdenlive (texto, fonte, tamanho, cor, duração). |
+| `title_add` | Cria um título nativo do Kdenlive (texto, fonte, tamanho, cor, duração, negrito, alinhamento, posição, contorno e caixa de fundo). |
 | `title_update` | Altera texto ou estilo de um título. |
 | `subtitle_import_srt` | Importa um `.srt` como títulos sincronizados. |
 | `subtitle_export_srt` | Exporta as legendas da timeline em `.srt`. |
@@ -164,6 +170,14 @@ Todas as 93 têm teste automatizado. A descrição completa de cada uma (parâme
 |---|---|
 | `guide_add` / `guide_get` / `guide_update` / `guide_remove` / `guide_list` | Guias (capítulos) na régua da timeline, no formato do Kdenlive. |
 | `marker_add` / `marker_list` / `marker_remove` | Marcadores de timeline ou de um clipe. |
+
+### Kdenlive aberto
+
+| Ferramenta | O que faz |
+|---|---|
+| `kdenlive_live` | Liga ou desliga, na hora, o acompanhamento ao vivo: cada edição regrava o projeto e o Kdenlive aberto recarrega sozinho. |
+| `kdenlive_reload` | Grava e pede ao Kdenlive que recarregue o projeto uma vez. |
+| `kdenlive_open` | Abre o Kdenlive (uma janela) com o projeto, se nenhum já o mostra. |
 
 ### Sessão (desfazer e refazer)
 
@@ -239,10 +253,10 @@ Compile em modo release primeiro. Variáveis de ambiente com `-e` (veja `claude 
 
 ## Acompanhando o vídeo sendo criado, com o Kdenlive aberto
 
-Com `KDENLIVE_MCP_AUTORELOAD=1` o servidor grava o projeto a cada edição e **pede ao Kdenlive aberto que o recarregue sozinho** (a mesma ação do File ▸ Revert, pelo D-Bus: sem patch no Kdenlive e sem clicar em nada). O fluxo:
+Com `KDENLIVE_MCP_AUTORELOAD=1` (ou pedindo `kdenlive_live` com `enabled: true` no meio da conversa) o servidor grava o projeto a cada edição e **pede ao Kdenlive aberto que o recarregue sozinho** (a mesma ação do File ▸ Revert, pelo D-Bus: sem patch no Kdenlive e sem clicar em nada). O fluxo:
 
 1. Peça ao Claude para criar o projeto e salvar num caminho fixo (ex. "crie um projeto novo e salve em `~/Vídeos/meu-video.kdenlive`"). O projeto novo já vem com uma trilha de vídeo e uma de áudio.
-2. Abra esse mesmo arquivo no Kdenlive e espere ele terminar de carregar.
+2. Abra esse mesmo arquivo no Kdenlive (ou peça `kdenlive_open`) e espere ele terminar de carregar.
 3. Peça as edições. A cada uma, o Kdenlive recarrega e mostra o resultado (a timeline volta ao início, porque é um Revert).
 
 Cuidados:
@@ -260,8 +274,9 @@ Cuidados:
 | `KDENLIVE_MCP_AUTOSAVE=1` | Só regrava o projeto a cada edição (o Kdenlive só atualiza com File ▸ Revert). |
 | `KDENLIVE_MCP_RENDER_TIMEOUT_SECS` | Tempo limite de um render, em segundos (padrão 1800; aumente para vídeos longos). |
 | `KDENLIVE_MCP_BUSCTL` | Caminho do `busctl`, se estiver fora do `PATH` (ou um programa de teste). |
+| `KDENLIVE_MCP_KDENLIVE` | Programa que `kdenlive_open` executa (padrão: `kdenlive` no `PATH`, senão o `kdenlive*.AppImage` mais novo em `~/Applications`). |
 
-Sem nenhuma das duas primeiras, peça `project_save` depois de cada etapa. Edições feitas pela interface do Kdenlive só chegam ao Claude se ele reabrir o arquivo (`project_open`).
+Sem nenhuma das duas primeiras, peça `kdenlive_live` (liga na hora), `kdenlive_reload` (recarrega uma vez) ou `project_save` depois de cada etapa. Edições feitas pela interface do Kdenlive só chegam ao Claude se ele reabrir o arquivo (`project_open`).
 
 ## Conferindo o que foi montado (análise por quadros)
 
@@ -292,7 +307,7 @@ cargo test -- --test-threads=1
 cargo clippy --all-targets -- -D warnings
 ```
 
-103 testes: unitários (modelo, formato, geometria do reenquadramento, aritmética do ducking), contrato MCP real via stdio, e verificações de resultado: o reenquadramento é conferido **nos pixels** do quadro renderizado, o ducking **medindo o áudio renderizado**, e o recarregamento do Kdenlive contra um `busctl` falso (e, manualmente, contra o Kdenlive 26.04.1 e o 23.08.5 reais). Os testes que usam `ffmpeg` são ignorados se ele faltar.
+116 testes: unitários (modelo, formato, geometria do reenquadramento, aritmética do ducking), contrato MCP real via stdio, e verificações de resultado: o reenquadramento, o dissolve, os fades, a transformação animada, a imagem esticada e a caixa de fundo do título são conferidos **nos pixels** do quadro renderizado, o ducking **medindo o áudio renderizado**, e o recarregamento do Kdenlive contra um `busctl` falso (e, manualmente, contra o Kdenlive 26.04.1 e o 23.08.5 reais). Os testes que usam `ffmpeg` são ignorados se ele faltar.
 
 ## Limitações conhecidas
 

@@ -148,7 +148,9 @@ fn validar_documento(doc: &xmltree::Element) -> Value {
     let mut problemas: Vec<String> = Vec::new();
 
     for id in document::bin_clip_ids(doc) {
+        // clipes gerados (cor, título) têm `resource` que não é arquivo
         if let Some(producer) = document::find_producer(doc, &id)
+            && !matches!(document::get_property(producer, "mlt_service").as_deref(), Some("color" | "kdenlivetitle" | "pango"))
             && let Some(resource) = document::get_property(producer, "resource")
             && !Path::new(&resource).exists()
         {

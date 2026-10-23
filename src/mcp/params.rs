@@ -84,6 +84,19 @@ pub struct BinImportClipParams {
     pub path: String,
     /// Nome de exibição do clipe na bin. Se omitido, usa o nome do arquivo.
     pub name: Option<String>,
+    /// Só para imagens paradas (png, jpg, webp, svg...): duração do clipe em
+    /// quadros. Padrão: 5 segundos. A imagem pode ser esticada na timeline.
+    pub duration_frames: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BinAddColorClipParams {
+    /// Cor: `#RRGGBB`, `#RRGGBBAA` ou `0xRRGGBBAA` (ex. preto: `#000000`).
+    pub color: String,
+    /// Duração em quadros (pode ser esticado na timeline depois).
+    pub duration_frames: i64,
+    /// Nome na bin. Padrão: "Cor <cor>".
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -116,6 +129,32 @@ pub struct TimelineAddClipParams {
     pub out_frame: i64,
     /// Posição na trilha, em quadros, onde o clipe deve começar.
     pub position: i64,
+    /// Para um clipe de vídeo com som: trilha de ÁUDIO onde pôr o som dele,
+    /// ligado ao vídeo (grupo vídeo+áudio do Kdenlive). A trilha de vídeo
+    /// não toca o áudio do clipe; sem isto o clipe fica mudo.
+    pub audio_track_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TimelineAddClipsParams {
+    /// Clipes a posicionar, na ordem (mesmos campos de timeline_add_clip).
+    pub clips: Vec<TimelineAddClipParams>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TimelineAddClipLoopParams {
+    pub track_id: String,
+    pub producer_id: String,
+    /// Posição na trilha onde o loop começa.
+    pub position: i64,
+    /// Duração total a preencher, em quadros.
+    pub duration_frames: i64,
+    /// Trecho do produtor que se repete. Padrão: o clipe inteiro da bin.
+    pub in_frame: Option<i64>,
+    pub out_frame: Option<i64>,
+    /// Onde, dentro do trecho, o loop começa (padrão 0). Útil para que dois
+    /// trechos do mesmo loop não comecem iguais.
+    pub start_offset: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -292,8 +331,21 @@ pub struct FilterSetParamParams {
 pub struct TransitionAddParams {
     /// Nome do serviço de transição do libmlt (ex. "luma" para dissolve/wipe).
     pub service: String,
+    /// Trilha de baixo (a que sai, no dissolve).
     pub track_a: String,
+    /// Trilha de cima (a que entra, no dissolve).
     pub track_b: String,
+    /// Primeiro quadro da timeline em que a transição vale (inclusive).
+    /// Informe junto com `out_frame`; sem os dois, vale na timeline inteira.
+    pub in_frame: Option<i64>,
+    /// Último quadro da timeline em que a transição vale (inclusive).
+    pub out_frame: Option<i64>,
+    /// Id da composição no Kdenlive (ex. "dissolve", "wipe"). Se omitido,
+    /// `luma` vira "dissolve" (ou "wipe" com o parâmetro `resource`).
+    pub kdenlive_id: Option<String>,
+    /// Propriedades extras da transição (ex. {"softness": "0.2"},
+    /// {"resource": "/caminho/wipe.pgm"}, {"reverse": "1"}).
+    pub params: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -457,6 +509,24 @@ pub struct TitleAddParams {
     /// Cor no formato `0xRRGGBBAA` (ex. branco opaco: `0xffffffff`).
     #[serde(default = "cor_titulo_padrao")]
     pub color: String,
+    /// Negrito.
+    pub bold: Option<bool>,
+    /// Alinhamento do texto na caixa: "left", "center" (padrão) ou "right".
+    pub align: Option<String>,
+    /// Borda esquerda da caixa de texto, em px (padrão 0).
+    pub x: Option<i64>,
+    /// Centro vertical do texto, em px (padrão: centro do quadro).
+    pub y: Option<i64>,
+    /// Largura da caixa de texto, em px (padrão: até a borda direita).
+    pub box_width: Option<i64>,
+    /// Espessura do contorno das letras, em px (padrão 0 = sem contorno).
+    pub outline_width: Option<f64>,
+    /// Cor do contorno (padrão preto).
+    pub outline_color: Option<String>,
+    /// Cor da caixa de fundo atrás do texto (ex. "#000000AA"). Sem ela, sem caixa.
+    pub background_color: Option<String>,
+    /// Folga da caixa de fundo em volta do texto, em px (padrão 24).
+    pub padding: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -478,6 +548,73 @@ pub struct KeyframeSetParams {
     pub param: String,
     pub frame: i64,
     pub value: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KeyframeValue {
+    pub frame: i64,
+    /// Valor bruto que o filtro espera naquele quadro (ex. "-12", "0 0 1920 1080 1").
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KeyframeSetManyParams {
+    pub clip_ref: String,
+    pub filter_id: String,
+    pub param: String,
+    pub keyframes: Vec<KeyframeValue>,
+    /// `true`: `frame` conta do início do clipe na timeline. `false` (padrão):
+    /// quadro da mídia, como em keyframe_set.
+    pub relative_to_clip: Option<bool>,
+    /// `true`: apaga os keyframes anteriores do parâmetro. Padrão `false`.
+    pub replace: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClipFadeParams {
+    pub clip_ref: String,
+    /// "in" (entrada) ou "out" (saída).
+    pub kind: String,
+    /// Duração do fade, em quadros.
+    pub duration_frames: i64,
+    /// Só vídeo: "alpha" (padrão; transparência, mostra a trilha de baixo) ou
+    /// "black" (do/para o preto). Ignorado em trilhas de áudio.
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TransformKeyframeParams {
+    /// Quadro relativo ao início do clipe (0 = primeiro quadro do clipe).
+    pub frame: i64,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// 0 (transparente) a 1 (opaco). Padrão 1.
+    pub opacity: Option<f64>,
+    /// Rotação em graus, em torno do centro.
+    pub rotation: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClipAnimateTransformParams {
+    pub clip_ref: String,
+    pub keyframes: Vec<TransformKeyframeParams>,
+    /// "linear" (padrão), "smooth" (suave) ou "hold" (degrau).
+    pub interpolation: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KdenliveLiveParams {
+    /// `true` liga: cada edição regrava o projeto e o Kdenlive aberto recarrega
+    /// sozinho. `false` desliga.
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KdenliveOpenParams {
+    /// Projeto a abrir. Padrão: o projeto desta sessão (precisa ter sido salvo).
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -41,7 +41,7 @@ fn main() {
         .map(|s| String::from_utf8_lossy(&s.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Sans".to_string());
-    document::add_title_clip(&mut doc, "titulo0", "kdenlive-mcp-plus", 75, &fonte, 96, "0xffffffff")
+    document::add_title_clip(&mut doc, "titulo0", "kdenlive-mcp-plus", 75, &fonte, 96, "0xffffffff", document::TitleStyle::default())
         .expect("add_title_clip");
 
     // Trilhas: vídeo principal, vídeo de título, áudio.
@@ -57,7 +57,7 @@ fn main() {
     document::add_clip_to_track(&mut doc, "V2", "titulo0", 0, 74, 0).expect("add_clip_to_track V2");
 
     // Transição entre V1 e V2.
-    document::add_transition(&mut doc, "luma", "V1", "V2").expect("add_transition");
+    document::add_transition(&mut doc, "luma", "V1", "V2", &document::TransitionOptions::default()).expect("add_transition");
 
     // Guia, marcador geral e marcador de clipe (quadro 30 da mídia do clipe).
     document::add_guide(&mut doc, 25, "Guia de teste").expect("add_guide");

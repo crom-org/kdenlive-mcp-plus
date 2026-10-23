@@ -75,7 +75,7 @@ Lista de checklist de funcionalidade (decisão D-007); não é código copiado (
 
 | Nome | Descrição | Fase | Status |
 |---|---|---|---|
-| `transition_add` | Cria uma transição (ex. `luma`, para crossfade/wipe) entre duas trilhas, como `<transition>` filho do tractor principal, com `a_track`/`b_track` como índices numéricos das trilhas — sintaxe confirmada com `melt`. | 2 | testada |
+| `transition_add` | Cria uma transição (ex. `luma`, para crossfade/wipe) entre duas trilhas, como `<transition>` filho do tractor principal, com `a_track`/`b_track` como índices numéricos das trilhas — sintaxe confirmada com `melt`. Aceita intervalo (`in_frame`/`out_frame`), `kdenlive_id` e propriedades extras; `luma` vira a composição `dissolve`/`wipe` do Kdenlive (D-053). | 2 | testada |
 | `transition_remove` | Remove uma transição pelo ID. | 2 | testada |
 | `transition_set` | Altera um parâmetro de uma transição existente. | 2 | testada |
 | `transition_list` | Lista todas as transições da timeline. | 2 | testada |
@@ -182,6 +182,15 @@ Vindas da seção 6.2 do briefing original. Nota de proveniência mantida do lev
 | `bin_import_folder` | Lote | Importa todos os arquivos de mídia reconhecidos de uma pasta (não recursivo), sem falhar a chamada inteira por um arquivo com problema. | 2 | testada |
 | `render_cancel` | Render | Cancela um render assíncrono em andamento (`export_render` com `wait=false`), encerrando de verdade o processo filho — diferente de `render_queue_stop` do original, ver acima. | 1 | testada |
 | `render_progress` | Render | Consulta status e percentual de um render assíncrono em andamento. | 1 | testada |
+| `bin_add_color_clip` | Clipe | Cria um clipe de cor sólida (`color`, `0xRRGGBBAA`) com duração, esticável na timeline (D-056). | 3 | testada |
+| `clip_fade` | Efeitos | Fade de entrada/saída com os efeitos do Kdenlive: vídeo `fade_from_black`/`fade_to_black` (transparência ou preto), áudio `fadein`/`fadeout`; trecho em quadros da mídia (D-054). Verificada nos pixels. | 3 | testada |
+| `clip_animate_transform` | Transformação | Anima `rect` (posição, tamanho, opacidade) e rotação do `qtblend` com vários keyframes numa chamada, quadros relativos ao clipe, interpolação linear/suave/degrau (D-055). Verificada nos pixels. | 3 | testada |
+| `keyframe_set_many` | Keyframes | Vários keyframes de um parâmetro numa chamada (`relative_to_clip`, `replace`) (D-055). | 3 | testada |
+| `timeline_add_clips` | Lote | Vários clipes numa chamada, tudo ou nada, com `audio_track_id` opcional por clipe (D-058). | 3 | testada |
+| `timeline_add_clip_loop` | Lote | Preenche uma duração repetindo um trecho de um clipe, com `start_offset` (D-058). | 3 | testada |
+| `kdenlive_live` | Kdenlive aberto | Liga/desliga na hora o autosave + recarregamento do Kdenlive pelo D-Bus (D-060). | 3 | testada |
+| `kdenlive_reload` | Kdenlive aberto | Grava e pede ao Kdenlive que recarregue uma vez; devolve o resultado (D-060). | 3 | testada |
+| `kdenlive_open` | Kdenlive aberto | Abre o Kdenlive com o projeto, se nenhum já o mostra (D-060). | 3 | testada |
 
 ## Nomes
 

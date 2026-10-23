@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use crate::mcp::params::{
-    ClipRefParams, TimelineAddClipParams, TimelineAddTrackParams, TimelineAssembleRangesParams,
+    ClipRefParams, TimelineAddClipLoopParams, TimelineAddClipParams, TimelineAddClipsParams, TimelineAddTrackParams, TimelineAssembleRangesParams,
     TimelineMoveClipParams, TimelineRemoveTrackParams, TimelineSeekParams, TimelineSetZoomParams,
     TimelineSplitClipParams, TimelineTrimClipParams,
 };
@@ -29,10 +29,30 @@ fn track_json(doc: &xmltree::Element, track_id: &str) -> Value {
         .unwrap_or(0);
     json!({
         "track_id": track_id,
+        "rotulo_kdenlive": document::kdenlive_track_label(doc, track_id),
+        "nome": document::track_name(doc, track_id),
         "kind": match kind { Some(TrackKind::Video) => "video", Some(TrackKind::Audio) => "audio", None => "desconhecido" },
         "quantidade_clipes": clipes.len(),
         "comprimento_quadros": comprimento,
     })
+}
+
+/// Posiciona um clipe (e, com `audio_track_id`, o som dele numa trilha de
+/// áudio, agrupado com o vídeo — D-057). Devolve `(clip_ref, audio_clip_ref)`.
+fn posicionar(doc: &mut xmltree::Element, p: &TimelineAddClipParams) -> Result<(String, Option<String>), document::ModelError> {
+    if let Some(audio) = &p.audio_track_id
+        && document::track_kind(doc, audio) != Some(TrackKind::Audio)
+    {
+        return Err(document::ModelError::Invalid(format!("audio_track_id \"{audio}\" não é uma trilha de áudio")));
+    }
+    let indice = document::add_clip_to_track(doc, &p.track_id, &p.producer_id, p.in_frame, p.out_frame, p.position)?;
+    let clip_ref = format!("{}:{}", p.track_id, indice);
+    let Some(audio) = &p.audio_track_id else {
+        return Ok((clip_ref, None));
+    };
+    let indice_audio = document::add_clip_to_track(doc, audio, &p.producer_id, p.in_frame, p.out_frame, p.position)?;
+    document::group_av(doc, (&p.track_id, indice), (audio, indice_audio))?;
+    Ok((clip_ref, Some(format!("{audio}:{indice_audio}"))))
 }
 
 fn clip_entry_json(entry: &(usize, String, i64, i64), track_id: &str) -> Value {
@@ -91,23 +111,82 @@ impl KdenliveMcpServer {
         let resultado = self
             .with_session_mut(|session| {
                 session.snapshot_before(descricao);
-                let indice = document::add_clip_to_track(
-                    &mut session.doc,
-                    &params.track_id,
-                    &params.producer_id,
-                    params.in_frame,
-                    params.out_frame,
-                    params.position,
-                )?;
+                let refs = posicionar(&mut session.doc, &params)?;
                 session.mark_modified();
-                Ok(indice)
+                Ok(refs)
             })
             .await;
         match resultado {
-            Ok(indice) => json!({
+            Ok((clip_ref, audio_ref)) => json!({ "ok": true, "clip_ref": clip_ref, "audio_clip_ref": audio_ref }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_add_clips_impl(&self, params: TimelineAddClipsParams) -> Value {
+        if params.clips.is_empty() {
+            return erro("clips não pode ser vazio".to_string());
+        }
+        let descricao = format!("posicionar {} clipes", params.clips.len());
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                // tudo ou nada: se um clipe falhar, o documento volta ao estado de antes
+                let antes = session.doc.clone();
+                let mut refs = Vec::with_capacity(params.clips.len());
+                for (i, clipe) in params.clips.iter().enumerate() {
+                    match posicionar(&mut session.doc, clipe) {
+                        Ok(r) => refs.push(r),
+                        Err(e) => {
+                            session.doc = antes;
+                            return Err(document::ModelError::Invalid(format!("clipe {i} da lista: {e}")));
+                        }
+                    }
+                }
+                session.mark_modified();
+                Ok(refs)
+            })
+            .await;
+        match resultado {
+            Ok(refs) => json!({
                 "ok": true,
-                "clip_ref": format!("{}:{}", params.track_id, indice),
+                "clip_refs": refs.iter().map(|(v, _)| v.clone()).collect::<Vec<_>>(),
+                "audio_clip_refs": refs.iter().map(|(_, a)| a.clone()).collect::<Vec<_>>(),
             }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn timeline_add_clip_loop_impl(&self, params: TimelineAddClipLoopParams) -> Value {
+        let descricao = format!(
+            "preencher {} quadros com o clipe \"{}\" em loop na trilha \"{}\"",
+            params.duration_frames, params.producer_id, params.track_id
+        );
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                let (bin_in, bin_out) = document::producer_in_out(&session.doc, &params.producer_id)
+                    .ok_or_else(|| document::ModelError::NotFound(format!("produtor não encontrado: {}", params.producer_id)))?;
+                let (a, b) = (params.in_frame.unwrap_or(bin_in), params.out_frame.unwrap_or(bin_out));
+                let ranges = document::loop_ranges(a, b, params.duration_frames, params.start_offset.unwrap_or(0))?;
+                let antes = session.doc.clone();
+                let mut posicao = params.position;
+                let mut refs = Vec::with_capacity(ranges.len());
+                for [entrada, saida] in &ranges {
+                    match document::add_clip_to_track(&mut session.doc, &params.track_id, &params.producer_id, *entrada, *saida, posicao) {
+                        Ok(indice) => refs.push(format!("{}:{}", params.track_id, indice)),
+                        Err(e) => {
+                            session.doc = antes;
+                            return Err(e);
+                        }
+                    }
+                    posicao += saida - entrada + 1;
+                }
+                session.mark_modified();
+                Ok((refs, ranges))
+            })
+            .await;
+        match resultado {
+            Ok((refs, ranges)) => json!({ "ok": true, "clip_refs": refs, "ranges": ranges }),
             Err(valor_erro) => valor_erro,
         }
     }

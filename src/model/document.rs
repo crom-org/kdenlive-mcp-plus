@@ -1323,6 +1323,9 @@ pub fn add_clip_to_track(
     // isso ele trata o clipe como "sem referência ao grupo" e o remove ao
     // abrir o projeto (achado empírico, D-039 em docs/decisoes.md).
     let kdenlive_id = get_property(producer, "kdenlive:id").unwrap_or_else(|| producer_id.to_string());
+    if find_track_playlist(root, track_id).is_some() {
+        stretch_still_producer(root, producer_id, clip_out);
+    }
 
     let playlist = find_track_playlist_mut(root, track_id)
         .ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {track_id}")))?;
@@ -1816,6 +1819,43 @@ pub struct TitleSpec {
     pub font_family: String,
     pub font_size: i64,
     pub color_rgba: String,
+    pub style: TitleStyle,
+}
+
+/// Aparência extra de um título (D-059): negrito, alinhamento, posição,
+/// contorno e caixa de fundo. Atributos do titulador do Kdenlive confirmados
+/// em `titles/simple.kdenlivetitle` do Kdenlive 26 (`font-outline`,
+/// `font-outline-color`) e no produtor `kdenlivetitle` do MLT
+/// (`QGraphicsRectItem` com `rect`, `brushcolor`, `pencolor`, `penwidth`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TitleStyle {
+    pub bold: bool,
+    /// Alinhamento Qt dentro da caixa: 1 = esquerda, 2 = direita, 4 = centro.
+    pub align: i64,
+    /// Borda esquerda da caixa de texto (px); padrão 0.
+    pub x: Option<i64>,
+    /// Centro vertical do texto (px); padrão o centro do quadro.
+    pub y: Option<i64>,
+    /// Largura da caixa de texto (px); padrão até a borda direita do quadro.
+    pub box_width: Option<i64>,
+    pub outline_width: f64,
+    /// Cor do contorno, `R,G,B,A`.
+    pub outline_rgba: Option<String>,
+    /// Cor da caixa de fundo atrás do texto, `R,G,B,A` (sem ela, sem caixa).
+    pub background_rgba: Option<String>,
+    /// Folga da caixa de fundo em volta do texto (px).
+    pub padding: i64,
+}
+
+impl Default for TitleStyle {
+    fn default() -> Self {
+        Self { bold: false, align: 4, x: None, y: None, box_width: None, outline_width: 0.0, outline_rgba: None, background_rgba: None, padding: 24 }
+    }
+}
+
+/// Converte uma cor do usuário para o formato `R,G,B,A` do titulador.
+pub fn title_color(cor: &str) -> Result<String, ModelError> {
+    color_to_rgba(cor)
 }
 
 /// Converte `#RRGGBB`, `#RRGGBBAA`, `0xRRGGBB` ou `0xRRGGBBAA` para o
@@ -1846,44 +1886,82 @@ fn title_xmldata(root: &Element, spec: &TitleSpec) -> Result<String, ModelError>
             .unwrap_or(padrao)
     };
     let (w, h) = (dimensao("width", 1920), dimensao("height", 1080));
-    // Caixa do tamanho da largura do quadro, com alinhamento centralizado
-    // (Qt::AlignHCenter = 4): o texto fica centralizado sem precisar medir
-    // a fonte. Altura aproximada pela fonte, centralizada na vertical.
-    let caixa_h = ((spec.font_size as f64) * 1.4).round() as i64;
-    let y = ((h - caixa_h) / 2).max(0);
+    let st = &spec.style;
+    // Caixa de texto com a largura pedida (padrão: do `x` até a borda do
+    // quadro), com o alinhamento Qt dentro dela: o texto fica no lugar sem
+    // precisar medir a fonte. Altura aproximada pela fonte e pelo número de
+    // linhas, centrada em `y` (padrão: o centro do quadro).
+    let linhas = spec.text.lines().count().max(1) as i64;
+    let caixa_h = ((spec.font_size as f64) * 1.4).round() as i64 * linhas;
+    let x = st.x.unwrap_or(0).max(0);
+    let caixa_w = st.box_width.unwrap_or(w - x).max(1);
+    let y = (st.y.unwrap_or(h / 2) - caixa_h / 2).max(0);
 
     let tamanho = spec.font_size.to_string();
-    let (w_txt, h_txt, caixa_txt, y_txt) = (w.to_string(), h.to_string(), caixa_h.to_string(), y.to_string());
+    let (w_txt, h_txt, caixa_txt) = (w.to_string(), h.to_string(), caixa_h.to_string());
+    let (x_txt, y_txt, caixa_w_txt) = (x.to_string(), y.to_string(), caixa_w.to_string());
+    let (peso, alinhamento) = (if st.bold { "700" } else { "400" }, st.align.to_string());
+    let contorno = num(st.outline_width.max(0.0));
+    let cor_contorno = st.outline_rgba.clone().unwrap_or_else(|| "0,0,0,255".to_string());
     let mut conteudo = element_with_props(
         "content",
         &[
             ("font", &spec.font_family),
-            ("font-weight", "400"),
+            ("font-weight", peso),
             ("font-pixel-size", &tamanho),
             ("font-italic", "0"),
             ("font-underline", "0"),
             ("letter-spacing", "0"),
-            ("box-width", &w_txt),
+            ("box-width", &caixa_w_txt),
             ("box-height", &caixa_txt),
             ("tab-width", "80"),
             ("font-color", &spec.color_rgba),
-            ("alignment", "4"),
+            ("font-outline", &contorno),
+            ("font-outline-color", &cor_contorno),
+            ("alignment", &alinhamento),
             ("shadow", "0;#64000000;3;3;3"),
             ("typewriter", "0;2;1;0;0"),
         ],
         &[],
     );
     conteudo.children.push(XMLNode::Text(spec.text.clone()));
-    let mut transform = Element::new("transform");
-    transform.children.push(XMLNode::Text("1,0,0,0,1,0,0,0,1".to_string()));
-    let mut posicao = element_with_props("position", &[("x", "0"), ("y", &y_txt)], &[]);
-    posicao.children.push(XMLNode::Element(transform));
+    let transformacao = || {
+        let mut t = Element::new("transform");
+        t.children.push(XMLNode::Text("1,0,0,0,1,0,0,0,1".to_string()));
+        t
+    };
+    let mut posicao = element_with_props("position", &[("x", &x_txt), ("y", &y_txt)], &[]);
+    posicao.children.push(XMLNode::Element(transformacao()));
     let mut item = element_with_props("item", &[("type", "QGraphicsTextItem"), ("z-index", "0")], &[]);
     item.children.push(XMLNode::Element(posicao));
     item.children.push(XMLNode::Element(conteudo));
 
     let viewport = format!("0,0,{w},{h}");
     let mut titulo = element_with_props("kdenlivetitle", &[("width", &w_txt), ("height", &h_txt), ("LC_NUMERIC", "C")], &[]);
+    if let Some(fundo) = &st.background_rgba {
+        // Caixa de fundo do tamanho estimado do texto (0,58 da fonte por
+        // caractere), alinhada como o texto, com `padding` de folga.
+        let maior_linha = spec.text.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f64;
+        let largura = ((maior_linha * spec.font_size as f64 * 0.58) as i64 + 2 * st.padding).min(caixa_w + 2 * st.padding);
+        let altura = caixa_h + 2 * st.padding;
+        let rx = match st.align {
+            1 => x - st.padding,
+            2 => x + caixa_w - largura + st.padding,
+            _ => x + (caixa_w - largura) / 2,
+        };
+        let mut pos_caixa = element_with_props("position", &[("x", &rx.to_string()), ("y", &(y - st.padding).to_string())], &[]);
+        pos_caixa.children.push(XMLNode::Element(transformacao()));
+        let retangulo = format!("0,0,{largura},{altura}");
+        let conteudo_caixa = element_with_props(
+            "content",
+            &[("rect", &retangulo), ("pencolor", "0,0,0,0"), ("penwidth", "0"), ("brushcolor", fundo)],
+            &[],
+        );
+        let mut caixa = element_with_props("item", &[("type", "QGraphicsRectItem"), ("z-index", "-1")], &[]);
+        caixa.children.push(XMLNode::Element(pos_caixa));
+        caixa.children.push(XMLNode::Element(conteudo_caixa));
+        titulo.children.push(XMLNode::Element(caixa));
+    }
     titulo.children.push(XMLNode::Element(item));
     titulo.children.push(XMLNode::Element(element_with_props("startviewport", &[("rect", &viewport)], &[])));
     titulo.children.push(XMLNode::Element(element_with_props("endviewport", &[("rect", &viewport)], &[])));
@@ -1909,11 +1987,40 @@ pub fn title_spec(producer: &Element) -> Option<TitleSpec> {
                 .filter_map(XMLNode::as_element)
                 .filter(|e| attr_eq(e, "item", "type", "QGraphicsTextItem"))
                 .find_map(|item| item.get_child("content"))?;
+            let atributo = |nome: &str| conteudo.attributes.get(nome).cloned();
+            let item_texto = xml
+                .children
+                .iter()
+                .filter_map(XMLNode::as_element)
+                .find(|e| attr_eq(e, "item", "type", "QGraphicsTextItem"));
+            let posicao = item_texto.and_then(|i| i.get_child("position"));
+            let fonte: i64 = atributo("font-pixel-size").and_then(|v| v.parse().ok()).unwrap_or(48);
+            let peso: i64 = atributo("font-weight").and_then(|v| v.parse().ok()).unwrap_or(400);
+            let caixa_h: i64 = atributo("box-height").and_then(|v| v.parse().ok()).unwrap_or(fonte);
+            let fundo = xml
+                .children
+                .iter()
+                .filter_map(XMLNode::as_element)
+                .filter(|e| attr_eq(e, "item", "type", "QGraphicsRectItem"))
+                .find_map(|i| i.get_child("content")?.attributes.get("brushcolor").cloned());
+            let style = TitleStyle {
+                // escala Qt6 (700 = negrito) ou Qt5 (75 = negrito) — o Kdenlive grava as duas
+                bold: peso >= 600 || (63..100).contains(&peso),
+                align: atributo("alignment").and_then(|v| v.parse().ok()).unwrap_or(4),
+                x: posicao.and_then(|p| p.attributes.get("x")?.parse::<f64>().ok()).map(|v| v as i64),
+                y: posicao.and_then(|p| p.attributes.get("y")?.parse::<f64>().ok()).map(|v| v as i64 + caixa_h / 2),
+                box_width: atributo("box-width").and_then(|v| v.parse::<f64>().ok()).map(|v| v as i64),
+                outline_width: atributo("font-outline").and_then(|v| v.parse().ok()).unwrap_or(0.0),
+                outline_rgba: atributo("font-outline-color"),
+                background_rgba: fundo,
+                padding: 24,
+            };
             Some(TitleSpec {
                 text: conteudo.get_text().map(|t| t.into_owned()).unwrap_or_default(),
-                font_family: conteudo.attributes.get("font").cloned().unwrap_or_else(|| "Sans".to_string()),
-                font_size: conteudo.attributes.get("font-pixel-size").and_then(|v| v.parse().ok()).unwrap_or(48),
-                color_rgba: conteudo.attributes.get("font-color").cloned().unwrap_or_else(|| "255,255,255,255".to_string()),
+                font_family: atributo("font").unwrap_or_else(|| "Sans".to_string()),
+                font_size: fonte,
+                color_rgba: atributo("font-color").unwrap_or_else(|| "255,255,255,255".to_string()),
+                style,
             })
         }
         Some("pango") => Some(TitleSpec {
@@ -1923,6 +2030,7 @@ pub fn title_spec(producer: &Element) -> Option<TitleSpec> {
             color_rgba: get_property(producer, "fgcolour")
                 .and_then(|c| color_to_rgba(&c).ok())
                 .unwrap_or_else(|| "255,255,255,255".to_string()),
+            style: TitleStyle::default(),
         }),
         _ => None,
     }
@@ -1939,6 +2047,7 @@ pub fn add_title_clip(
     font_family: &str,
     font_size: i64,
     color_hex: &str,
+    style: TitleStyle,
 ) -> Result<String, ModelError> {
     if duration_frames <= 0 {
         return Err(ModelError::Invalid("a duração precisa ser maior que zero".to_string()));
@@ -1951,6 +2060,7 @@ pub fn add_title_clip(
         font_family: font_family.to_string(),
         font_size,
         color_rgba: color_to_rgba(color_hex)?,
+        style,
     };
     let xmldata = title_xmldata(root, &spec)?;
     let mut producer = element_with_props(
@@ -2100,35 +2210,97 @@ pub fn set_clip_transform(
 // principal — sintaxe confirmada empiricamente com `melt`)
 // ---------------------------------------------------------------------------
 
+/// Opções de uma transição (composição) do usuário.
+///
+/// - `range`: `(in, out)` em quadros da timeline (inclusive). Com ele, a
+///   transição vale só nesse intervalo — é assim que o Kdenlive grava uma
+///   composição (atributos `in`/`out` no `<transition>`), e é o que permite um
+///   dissolve/wipe entre dois clipes sobrepostos. Sem ele, vale na timeline
+///   inteira (comportamento anterior).
+/// - `kdenlive_id`: o id da composição no Kdenlive. Se omitido: `luma` vira
+///   `dissolve` (ou `wipe`, se houver o parâmetro `resource`, a imagem do
+///   wipe); os demais serviços usam o próprio nome.
+/// - `params`: propriedades extras (`softness`, `reverse`, `resource`, ...).
+#[derive(Debug, Default)]
+pub struct TransitionOptions<'a> {
+    pub range: Option<(i64, i64)>,
+    pub kdenlive_id: Option<&'a str>,
+    pub params: &'a [(String, String)],
+}
+
 /// Cria uma transição `service` (ex. `"luma"` para dissolve/wipe) entre as
-/// trilhas `track_a` e `track_b`. Devolve o id da transição.
+/// trilhas `track_a` (a de baixo, que sai) e `track_b` (a de cima, que
+/// entra). Devolve o id da transição.
 pub fn add_transition(
     root: &mut Element,
     service: &str,
     track_a: &str,
     track_b: &str,
+    opcoes: &TransitionOptions,
 ) -> Result<String, ModelError> {
     let a = track_index(root, track_a).ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {track_a}")))?;
     let b = track_index(root, track_b).ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {track_b}")))?;
+    if let Some((entrada, saida)) = opcoes.range
+        && (entrada < 0 || saida < entrada)
+    {
+        return Err(ModelError::Invalid(format!(
+            "intervalo inválido da transição: in={entrada}, out={saida} (precisa 0 <= in <= out)"
+        )));
+    }
+    let tem_param = |nome: &str| opcoes.params.iter().any(|(k, _)| k == nome);
+    let kdenlive_id = match (opcoes.kdenlive_id, service) {
+        (Some(id), _) => id.to_string(),
+        (None, "luma") if tem_param("resource") => "wipe".to_string(),
+        (None, "luma") => "dissolve".to_string(),
+        (None, outro) => outro.to_string(),
+    };
 
     let tractor = main_tractor_mut(root)
         .ok_or_else(|| ModelError::NotFound("tractor principal não encontrado".to_string()))?;
     let transition_id = next_child_id(tractor, "transition", "transition");
     let mut transicao = Element::new("transition");
     transicao.attributes.insert("id".to_string(), transition_id.clone());
+    if let Some((entrada, saida)) = opcoes.range {
+        transicao.attributes.insert("in".to_string(), entrada.to_string());
+        transicao.attributes.insert("out".to_string(), saida.to_string());
+    }
     set_property(&mut transicao, "mlt_service", service);
     // Mesmo motivo do `kdenlive_id` em `add_filter`: sem essa propriedade o
     // Kdenlive real marca a transição como "faltando" e a remove ao abrir.
-    set_property(&mut transicao, "kdenlive_id", service);
+    set_property(&mut transicao, "kdenlive_id", &kdenlive_id);
     set_property(&mut transicao, "a_track", &a.to_string());
     set_property(&mut transicao, "b_track", &b.to_string());
     // As trilhas foram escolhidas explicitamente pelo agente: sem isto o
     // Kdenlive "corrige" para a trilha de vídeo logo abaixo quando as duas
     // não são vizinhas (meltBuilder, `force_track == 0`).
     set_property(&mut transicao, "force_track", "1");
+    // Padrões das composições dissolve/wipe do Kdenlive (dissolve.xml/wipe.xml):
+    // respeitar a transparência dos clipes.
+    if service == "luma" {
+        for (nome, padrao) in [("alpha_over", "1"), ("fix_background_alpha", "1")] {
+            if !tem_param(nome) {
+                set_property(&mut transicao, nome, padrao);
+            }
+        }
+    }
+    for (nome, valor) in opcoes.params {
+        set_property(&mut transicao, nome, valor);
+    }
     tractor.children.push(XMLNode::Element(transicao));
     rebuild_internal_transitions(root);
     Ok(transition_id)
+}
+
+/// Intervalo `(in, out)` de uma transição, se ela tiver um (composição com
+/// intervalo); `None` = vale na timeline inteira.
+pub fn transition_range(root: &Element, transition_id: &str) -> Option<(i64, i64)> {
+    let tractor = main_tractor(root)?;
+    let e = tractor
+        .children
+        .iter()
+        .filter_map(XMLNode::as_element)
+        .find(|e| attr_eq(e, "transition", "id", transition_id))?;
+    Some((e.attributes.get("in")?.parse().ok()?, e.attributes.get("out")?.parse().ok()?))
 }
 
 pub fn remove_transition(root: &mut Element, transition_id: &str) -> Result<(), ModelError> {
@@ -2457,6 +2629,456 @@ pub fn remove_marker(root: &mut Element, id: &str) -> Result<(), ModelError> {
     store_all(root, &itens)
 }
 
+// ---------------------------------------------------------------------------
+// Fades, transformação animada e keyframes em lote, no formato que o próprio
+// Kdenlive grava (D-054/D-055). Confirmado nos efeitos do Kdenlive 26
+// (`effects/fade_from_black.xml`, `fade_to_black.xml`, `fadein.xml`,
+// `fadeout.xml`) e em projetos salvos por ele: filtros de clipe guardam o
+// trecho (`in`/`out`) e os keyframes em quadros da MÍDIA do clipe (o primeiro
+// keyframe de um clipe que começa no quadro 31 s da mídia é `00:00:31.000=`).
+// ---------------------------------------------------------------------------
+
+/// `in`/`out` (quadros da mídia) de um clipe da timeline.
+fn entry_in_out(entry: &Element) -> (i64, i64) {
+    let ler = |nome: &str| entry.attributes.get(nome).and_then(|s| s.parse().ok()).unwrap_or(0);
+    (ler("in"), ler("out"))
+}
+
+fn clip_in_out(root: &Element, track_id: &str, index: usize) -> Result<(i64, i64), ModelError> {
+    get_clip(root, track_id, index)
+        .map(entry_in_out)
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {track_id}:{index}")))
+}
+
+/// Número sem casas decimais inúteis (`960`, `0.5`, `12.25`).
+fn num(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{}", v as i64)
+    } else {
+        let texto = format!("{v:.4}");
+        texto.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FadeKind {
+    In,
+    Out,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FadeMode {
+    /// Transparência: o clipe aparece/some deixando ver a trilha de baixo.
+    Alpha,
+    /// Do preto / para o preto.
+    Black,
+}
+
+/// Fade de entrada ou de saída de um clipe, com os efeitos do próprio Kdenlive:
+/// - vídeo: `brightness` com `kdenlive_id` `fade_from_black`/`fade_to_black`,
+///   animando `alpha` (modo transparência) ou `level` (modo preto);
+/// - áudio: `volume` com `kdenlive_id` `fadein`/`fadeout` (`gain` → `end`).
+///
+/// O filtro ocupa só o trecho do fade. Chamar de novo substitui o fade do
+/// mesmo tipo. Devolve `(filter_id, kdenlive_id)`.
+pub fn clip_fade(
+    root: &mut Element,
+    track_id: &str,
+    index: usize,
+    kind: FadeKind,
+    frames: i64,
+    mode: FadeMode,
+) -> Result<(String, String), ModelError> {
+    if frames <= 0 {
+        return Err(ModelError::Invalid("a duração do fade precisa ser maior que zero".to_string()));
+    }
+    let video = match track_kind(root, track_id) {
+        Some(TrackKind::Video) => true,
+        Some(TrackKind::Audio) => false,
+        None => return Err(ModelError::NotFound(format!("trilha não encontrada: {track_id}"))),
+    };
+    let (cin, cout) = clip_in_out(root, track_id, index)?;
+    let duracao = cout - cin + 1;
+    if frames > duracao {
+        return Err(ModelError::Invalid(format!(
+            "o fade ({frames} quadros) é maior que o clipe ({duracao} quadros)"
+        )));
+    }
+    let (f_in, f_out) = match kind {
+        FadeKind::In => (cin, cin + frames - 1),
+        FadeKind::Out => (cout - frames + 1, cout),
+    };
+    let (servico, kdenlive_id) = match (video, kind) {
+        (true, FadeKind::In) => ("brightness", "fade_from_black"),
+        (true, FadeKind::Out) => ("brightness", "fade_to_black"),
+        (false, FadeKind::In) => ("volume", "fadein"),
+        (false, FadeKind::Out) => ("volume", "fadeout"),
+    };
+    let entry = get_clip_mut(root, track_id, index)
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {track_id}:{index}")))?;
+    entry.children.retain(|n| {
+        !matches!(n, XMLNode::Element(e) if e.name == "filter" && get_property(e, "kdenlive_id").as_deref() == Some(kdenlive_id))
+    });
+    let filter_id = next_child_id(entry, "filter", "filter");
+    let mut filtro = Element::new("filter");
+    filtro.attributes.insert("id".to_string(), filter_id.clone());
+    filtro.attributes.insert("in".to_string(), f_in.to_string());
+    filtro.attributes.insert("out".to_string(), f_out.to_string());
+    set_property(&mut filtro, "mlt_service", servico);
+    set_property(&mut filtro, "kdenlive_id", kdenlive_id);
+    if video {
+        // `-1` = último quadro do trecho do filtro (sintaxe de animação do MLT,
+        // a mesma que o Kdenlive grava por padrão nesses efeitos)
+        let animacao = if kind == FadeKind::In { "0=0;-1=1" } else { "0=1;-1=0" };
+        set_property(&mut filtro, "start", "1");
+        match mode {
+            FadeMode::Alpha => {
+                set_property(&mut filtro, "level", "1");
+                set_property(&mut filtro, "alpha", animacao);
+            }
+            FadeMode::Black => {
+                set_property(&mut filtro, "level", animacao);
+                set_property(&mut filtro, "alpha", "1");
+            }
+        }
+    } else {
+        let (ganho, fim) = if kind == FadeKind::In { ("0", "1") } else { ("1", "0") };
+        set_property(&mut filtro, "gain", ganho);
+        set_property(&mut filtro, "end", fim);
+    }
+    entry.children.push(XMLNode::Element(filtro));
+    Ok((filter_id, kdenlive_id.to_string()))
+}
+
+/// Tipo de interpolação entre keyframes (sintaxe de animação do MLT: `=`
+/// linear, `~=` suave, `|=` degrau).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interpolation {
+    Linear,
+    Smooth,
+    Hold,
+}
+
+impl Interpolation {
+    fn separador(self) -> &'static str {
+        match self {
+            Interpolation::Linear => "=",
+            Interpolation::Smooth => "~=",
+            Interpolation::Hold => "|=",
+        }
+    }
+}
+
+/// Um keyframe de transformação: retângulo de destino (px do quadro do
+/// projeto), opacidade 0..1 e rotação opcional (graus).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransformKeyframe {
+    pub frame: i64,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub opacity: f64,
+    pub rotation: Option<f64>,
+}
+
+/// Anima posição, tamanho, opacidade (e rotação) de um clipe pelo filtro
+/// `qtblend` (o efeito "Transform" do Kdenlive, o mesmo de
+/// `set_clip_transform`). `frame` é relativo ao início do clipe na timeline
+/// (0 = primeiro quadro do clipe) e é gravado em quadros da mídia. Substitui
+/// a animação anterior desse filtro. Devolve o id do filtro.
+pub fn clip_animate_transform(
+    root: &mut Element,
+    track_id: &str,
+    index: usize,
+    keyframes: &[TransformKeyframe],
+    interp: Interpolation,
+) -> Result<String, ModelError> {
+    if keyframes.is_empty() {
+        return Err(ModelError::Invalid("informe pelo menos um keyframe".to_string()));
+    }
+    let (cin, cout) = clip_in_out(root, track_id, index)?;
+    let duracao = cout - cin + 1;
+    let mut kfs = keyframes.to_vec();
+    kfs.sort_by_key(|k| k.frame);
+    for k in &kfs {
+        if k.frame < 0 || k.frame >= duracao {
+            return Err(ModelError::Invalid(format!(
+                "keyframe no quadro {} fora do clipe (0 a {})",
+                k.frame,
+                duracao - 1
+            )));
+        }
+        if !(0.0..=1.0).contains(&k.opacity) {
+            return Err(ModelError::Invalid(format!("opacidade {} fora de 0..1", k.opacity)));
+        }
+        if k.width <= 0.0 || k.height <= 0.0 {
+            return Err(ModelError::Invalid("largura e altura precisam ser maiores que zero".to_string()));
+        }
+    }
+    kfs.dedup_by_key(|k| k.frame);
+    let sep = interp.separador();
+    let rect = kfs
+        .iter()
+        .map(|k| format!("{}{sep}{} {} {} {} {}", cin + k.frame, num(k.x), num(k.y), num(k.width), num(k.height), num(k.opacity)))
+        .collect::<Vec<_>>()
+        .join(";");
+    let filter_id = set_or_create_filter_param(root, track_id, index, "qtblend", "rect", &rect)?;
+    if kfs.iter().any(|k| k.rotation.is_some()) {
+        let rotacao = kfs
+            .iter()
+            .map(|k| format!("{}{sep}{}", cin + k.frame, num(k.rotation.unwrap_or(0.0))))
+            .collect::<Vec<_>>()
+            .join(";");
+        set_filter_param(root, track_id, index, &filter_id, "rotation", &rotacao)?;
+        set_filter_param(root, track_id, index, &filter_id, "rotate_center", "1")?;
+    }
+    Ok(filter_id)
+}
+
+/// Grava vários keyframes de um parâmetro de uma vez. Com `relative_to_clip`,
+/// `frame` conta a partir do início do clipe na timeline (convertido para
+/// quadros da mídia); sem ele, é o quadro da mídia (como `keyframe_set`). Com
+/// `replace`, descarta os keyframes anteriores do parâmetro. Devolve quantos
+/// keyframes o parâmetro ficou tendo.
+#[allow(clippy::too_many_arguments)]
+pub fn keyframes_set_many(
+    root: &mut Element,
+    track_id: &str,
+    index: usize,
+    filter_id: &str,
+    param: &str,
+    pares: &[(i64, String)],
+    relative_to_clip: bool,
+    replace: bool,
+) -> Result<usize, ModelError> {
+    if pares.is_empty() {
+        return Err(ModelError::Invalid("informe pelo menos um keyframe".to_string()));
+    }
+    let (cin, _) = clip_in_out(root, track_id, index)?;
+    let desloc = if relative_to_clip { cin } else { 0 };
+    let mut atuais = if replace {
+        Vec::new()
+    } else {
+        parse_keyframes(&get_filter_param(root, track_id, index, filter_id, param).unwrap_or_default())
+    };
+    for (quadro, valor) in pares {
+        let q = quadro + desloc;
+        atuais.retain(|(f, _)| *f != q);
+        atuais.push((q, valor.clone()));
+    }
+    let total = atuais.len();
+    set_filter_param(root, track_id, index, filter_id, param, &format_keyframes(atuais))?;
+    Ok(total)
+}
+
+// ---------------------------------------------------------------------------
+// Clipes de imagem e de cor, no formato do Kdenlive (D-056): imagem =
+// `qimage` (como o Kdenlive grava um PNG/JPG), cor = `color`; os dois com
+// `length` e `kdenlive:duration`, e esticáveis na timeline.
+// ---------------------------------------------------------------------------
+
+/// Extensões tratadas como imagem parada.
+pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "svg"];
+
+/// `true` se o caminho parece uma imagem parada (pela extensão).
+pub fn is_image_path(caminho: &str) -> bool {
+    std::path::Path::new(caminho)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| IMAGE_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+}
+
+/// Quadros → timecode `HH:MM:SS:FF` (como o Kdenlive grava `kdenlive:duration`).
+fn frames_to_timecode(frames: i64, fps: f64) -> String {
+    let fps_i = fps.round().max(1.0) as i64;
+    let (s_total, ff) = (frames / fps_i, frames % fps_i);
+    format!("{:02}:{:02}:{:02}:{:02}", s_total / 3600, (s_total / 60) % 60, s_total % 60, ff)
+}
+
+/// Cria um clipe de imagem parada (`qimage`) na bin, com a duração dada.
+pub fn add_image_clip(
+    root: &mut Element,
+    id: &str,
+    resource: &str,
+    clip_name: &str,
+    duration_frames: i64,
+) -> Result<String, ModelError> {
+    if duration_frames <= 0 {
+        return Err(ModelError::Invalid("a duração precisa ser maior que zero".to_string()));
+    }
+    let fps = profile_fps(root);
+    let (dur, out) = (duration_frames.to_string(), (duration_frames - 1).to_string());
+    let mut producer = element_with_props(
+        "producer",
+        &[("id", id), ("in", "0"), ("out", &out)],
+        &[
+            ("length", &dur),
+            ("eof", "pause"),
+            ("resource", resource),
+            ("ttl", "25"),
+            ("aspect_ratio", "1"),
+            ("mlt_service", "qimage"),
+            ("kdenlive:clipname", clip_name),
+            ("kdenlive:duration", &frames_to_timecode(duration_frames, fps)),
+            ("kdenlive:clip_type", "2"),
+        ],
+    );
+    assign_bin_identity(root, &mut producer);
+    insert_bin_producer(root, producer)?;
+    Ok(id.to_string())
+}
+
+/// Converte `#RRGGBB`/`#RRGGBBAA`/`0x...` para `0xRRGGBBAA` (formato do
+/// produtor `color` do MLT, o que o Kdenlive grava).
+fn color_to_mlt(cor: &str) -> Result<String, ModelError> {
+    let rgba = color_to_rgba(cor)?;
+    let partes: Vec<u8> = rgba.split(',').filter_map(|p| p.parse().ok()).collect();
+    match partes.as_slice() {
+        [r, g, b, a] => Ok(format!("0x{r:02x}{g:02x}{b:02x}{a:02x}")),
+        _ => Err(ModelError::Invalid(format!("cor inválida: \"{cor}\""))),
+    }
+}
+
+/// Cria um clipe de cor sólida (`color`) na bin, com a duração dada.
+pub fn add_color_clip(
+    root: &mut Element,
+    id: &str,
+    color: &str,
+    clip_name: &str,
+    duration_frames: i64,
+) -> Result<String, ModelError> {
+    if duration_frames <= 0 {
+        return Err(ModelError::Invalid("a duração precisa ser maior que zero".to_string()));
+    }
+    let fps = profile_fps(root);
+    let recurso = color_to_mlt(color)?;
+    let (dur, out) = (duration_frames.to_string(), (duration_frames - 1).to_string());
+    let mut producer = element_with_props(
+        "producer",
+        &[("id", id), ("in", "0"), ("out", &out)],
+        &[
+            ("length", &dur),
+            ("eof", "pause"),
+            ("resource", &recurso),
+            ("aspect_ratio", "1"),
+            ("mlt_service", "color"),
+            ("mlt_image_format", "rgba"),
+            ("kdenlive:clipname", clip_name),
+            ("kdenlive:duration", &frames_to_timecode(duration_frames, fps)),
+            ("kdenlive:clip_type", "2"),
+        ],
+    );
+    assign_bin_identity(root, &mut producer);
+    insert_bin_producer(root, producer)?;
+    Ok(id.to_string())
+}
+
+/// Imagens, cores e títulos podem ser esticados na timeline além da duração
+/// da bin (como no Kdenlive): se `clip_out` passar do fim do produtor, o
+/// `length`/`out` dele crescem junto.
+fn stretch_still_producer(root: &mut Element, producer_id: &str, clip_out: i64) {
+    let Some(p) = find_producer_mut(root, producer_id) else { return };
+    if !matches!(get_property(p, "mlt_service").as_deref(), Some("qimage" | "pixbuf" | "color" | "kdenlivetitle")) {
+        return;
+    }
+    let comprimento: i64 = get_property(p, "length").and_then(|v| v.parse().ok()).unwrap_or(0);
+    if clip_out >= comprimento {
+        set_property(p, "length", &(clip_out + 1).to_string());
+        p.attributes.insert("out".to_string(), clip_out.to_string());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vídeo + áudio ligados (D-057): a trilha de vídeo do Kdenlive esconde o
+// áudio (`hide="audio"`), então o som de um clipe de vídeo precisa de uma
+// segunda entrada numa trilha de áudio, agrupada com a de vídeo num grupo
+// "AVSplit" (`kdenlive:sequenceproperties.groups`, JSON; folha =
+// "índice_mlt_da_trilha:posição:-1", confirmado em projetos salvos pelo
+// Kdenlive 26).
+// ---------------------------------------------------------------------------
+
+const PROP_GROUPS: &str = "kdenlive:sequenceproperties.groups";
+
+/// Posição na timeline (quadro) do clipe `index` da trilha.
+pub fn clip_position(root: &Element, track_id: &str, index: usize) -> Option<i64> {
+    let playlist = find_track_playlist(root, track_id)?;
+    nth_slot_index(playlist, index)?;
+    Some(position_of_slot(playlist, index))
+}
+
+/// Agrupa dois clipes como vídeo+áudio do mesmo arquivo (grupo "AVSplit").
+pub fn group_av(root: &mut Element, video: (&str, usize), audio: (&str, usize)) -> Result<(), ModelError> {
+    let mut folhas = Vec::new();
+    for (trilha, indice) in [video, audio] {
+        let ti = track_index(root, trilha).ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {trilha}")))?;
+        let pos = clip_position(root, trilha, indice)
+            .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {trilha}:{indice}")))?;
+        folhas.push(serde_json::json!({ "data": format!("{ti}:{pos}:-1"), "leaf": "clip", "type": "Leaf" }));
+    }
+    let tractor = main_tractor_mut(root)
+        .ok_or_else(|| ModelError::NotFound("tractor da sequência não encontrado".to_string()))?;
+    let mut grupos: Vec<serde_json::Value> = get_property(tractor, PROP_GROUPS)
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    grupos.push(serde_json::json!({ "children": folhas, "type": "AVSplit" }));
+    let texto = serde_json::to_string(&grupos).map_err(|e| ModelError::Invalid(e.to_string()))?;
+    set_property(tractor, PROP_GROUPS, &texto);
+    Ok(())
+}
+
+/// Grupos de clipes gravados na sequência (JSON do Kdenlive), se houver.
+pub fn clip_groups(root: &Element) -> Vec<serde_json::Value> {
+    main_tractor(root)
+        .and_then(|t| get_property(t, PROP_GROUPS))
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Rótulos das trilhas como o Kdenlive mostra (D-058): vídeo V1, V2, ... de
+// baixo para cima; áudio A1, A2, ... a partir da fronteira com o vídeo (A1 é
+// a trilha de áudio mais alta). A ordem de criação das trilhas não é a ordem
+// de exibição, o que confundia os nomes dados às trilhas.
+// ---------------------------------------------------------------------------
+
+pub fn kdenlive_track_label(root: &Element, track_id: &str) -> Option<String> {
+    let ids = track_ids(root);
+    let videos: Vec<&String> = ids.iter().filter(|id| track_kind(root, id) == Some(TrackKind::Video)).collect();
+    let audios: Vec<&String> = ids.iter().filter(|id| track_kind(root, id) == Some(TrackKind::Audio)).collect();
+    if let Some(i) = videos.iter().position(|id| *id == track_id) {
+        return Some(format!("V{}", i + 1));
+    }
+    audios.iter().position(|id| *id == track_id).map(|i| format!("A{}", audios.len() - i))
+}
+
+/// `in`/`out` de um produtor (o intervalo do clipe da bin).
+pub fn producer_in_out(root: &Element, producer_id: &str) -> Option<(i64, i64)> {
+    let p = find_producer(root, producer_id)?;
+    let ler = |nome: &str| p.attributes.get(nome).and_then(|v| v.parse().ok());
+    Some((ler("in").unwrap_or(0), ler("out")?))
+}
+
+/// Intervalos `[in, out]` que preenchem `duration` quadros repetindo o trecho
+/// `[clip_in, clip_out]` do produtor, começando em `start_offset` dentro do
+/// trecho (para clipes em loop, como um fundo animado).
+pub fn loop_ranges(clip_in: i64, clip_out: i64, duration: i64, start_offset: i64) -> Result<Vec<[i64; 2]>, ModelError> {
+    let ciclo = clip_out - clip_in + 1;
+    if ciclo <= 0 || duration <= 0 {
+        return Err(ModelError::Invalid("o trecho e a duração precisam ser maiores que zero".to_string()));
+    }
+    let mut a = clip_in + start_offset.rem_euclid(ciclo);
+    let mut falta = duration;
+    let mut ranges = Vec::new();
+    while falta > 0 {
+        let n = falta.min(clip_out - a + 1);
+        ranges.push([a, a + n - 1]);
+        falta -= n;
+        a = clip_in;
+    }
+    Ok(ranges)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2709,7 +3331,7 @@ mod tests {
         let t1 = add_track(&mut doc, "playlist1", TrackKind::Video).expect("trilha 1");
 
         assert!(list_transitions(&doc).is_empty());
-        let transition_id = add_transition(&mut doc, "luma", &t0, &t1).expect("cria transição");
+        let transition_id = add_transition(&mut doc, "luma", &t0, &t1, &TransitionOptions::default()).expect("cria transição");
         assert_eq!(list_transitions(&doc), vec![(transition_id.clone(), "luma".to_string())]);
 
         set_transition_param(&mut doc, &transition_id, "softness", "0.5").expect("ajusta parâmetro");
@@ -2950,7 +3572,7 @@ mod tests {
     #[test]
     fn titulo_cria_le_e_atualiza() {
         let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
-        let id = add_title_clip(&mut doc, "producer0", "Olá & <tchau>", 50, "Sans", 48, "0xffffffff").expect("cria título");
+        let id = add_title_clip(&mut doc, "producer0", "Olá & <tchau>", 50, "Sans", 48, "0xffffffff", TitleStyle::default()).expect("cria título");
 
         let p = find_producer(&doc, &id).unwrap();
         assert_eq!(get_property(p, "mlt_service"), Some("kdenlivetitle".to_string()));
@@ -3053,4 +3675,113 @@ mod tests {
     }
 
     use profile::DEFAULT_PROFILE as DEFAULT_PROFILE_PARA_TESTE;
+    fn doc_com_trilhas() -> (Element, String, String) {
+        let mut doc = new_document(crate::model::profile::DEFAULT_PROFILE).expect("perfil");
+        add_track(&mut doc, "track0", TrackKind::Video).expect("v");
+        add_track(&mut doc, "track1", TrackKind::Audio).expect("a");
+        add_color_clip(&mut doc, "producer0", "#ff0000", "vermelho", 50).expect("cor");
+        (doc, "track0".to_string(), "track1".to_string())
+    }
+
+    #[test]
+    fn loop_ranges_emenda_o_ciclo_a_partir_do_deslocamento() {
+        assert_eq!(loop_ranges(0, 9, 25, 3).expect("ok"), vec![[3, 9], [0, 9], [0, 7]]);
+        assert_eq!(loop_ranges(10, 19, 5, 0).expect("ok"), vec![[10, 14]]);
+        assert_eq!(loop_ranges(0, 9, 10, 13).expect("ok"), vec![[3, 9], [0, 2]], "deslocamento maior que o ciclo dá a volta");
+        assert!(loop_ranges(5, 4, 10, 0).is_err());
+        assert!(loop_ranges(0, 9, 0, 0).is_err());
+    }
+
+    #[test]
+    fn rotulos_seguem_a_numeracao_do_kdenlive() {
+        let (mut doc, v1, a_antigo) = doc_com_trilhas();
+        add_track(&mut doc, "track2", TrackKind::Video).expect("v2");
+        add_track(&mut doc, "track3", TrackKind::Audio).expect("a nova");
+        assert_eq!(kdenlive_track_label(&doc, &v1).as_deref(), Some("V1"));
+        assert_eq!(kdenlive_track_label(&doc, "track2").as_deref(), Some("V2"));
+        assert_eq!(kdenlive_track_label(&doc, "track3").as_deref(), Some("A1"));
+        assert_eq!(kdenlive_track_label(&doc, &a_antigo).as_deref(), Some("A2"));
+        assert_eq!(kdenlive_track_label(&doc, "nao_existe"), None);
+    }
+
+    #[test]
+    fn transicao_luma_vira_dissolve_ou_wipe_e_guarda_o_intervalo() {
+        let (mut doc, v1, _) = doc_com_trilhas();
+        add_track(&mut doc, "track2", TrackKind::Video).expect("v2");
+        let dissolve = add_transition(&mut doc, "luma", &v1, "track2", &TransitionOptions { range: Some((10, 30)), ..Default::default() })
+            .expect("dissolve");
+        assert_eq!(transition_range(&doc, &dissolve), Some((10, 30)));
+        let extras = vec![("resource".to_string(), "/tmp/wipe.pgm".to_string())];
+        let wipe = add_transition(&mut doc, "luma", &v1, "track2", &TransitionOptions { params: &extras, ..Default::default() }).expect("wipe");
+        assert_eq!(transition_range(&doc, &wipe), None, "sem intervalo vale na timeline inteira");
+        let tractor = main_tractor(&doc).expect("tractor");
+        let kids: Vec<String> = tractor
+            .children
+            .iter()
+            .filter_map(XMLNode::as_element)
+            .filter(|e| e.name == "transition" && !is_internal_transition(e))
+            .filter_map(|e| get_property(e, "kdenlive_id"))
+            .collect();
+        assert_eq!(kids, vec!["dissolve".to_string(), "wipe".to_string()]);
+        assert!(add_transition(&mut doc, "luma", &v1, "track2", &TransitionOptions { range: Some((30, 10)), ..Default::default() }).is_err());
+    }
+
+    #[test]
+    fn fade_usa_os_efeitos_do_kdenlive_no_trecho_da_midia() {
+        let (mut doc, v1, a1) = doc_com_trilhas();
+        add_clip_to_track(&mut doc, &v1, "producer0", 20, 39, 0).expect("clipe");
+        let (id, kid) = clip_fade(&mut doc, &v1, 0, FadeKind::Out, 5, FadeMode::Alpha).expect("fade");
+        assert_eq!(kid, "fade_to_black");
+        let filtro = get_clip(&doc, &v1, 0)
+            .expect("clipe")
+            .children
+            .iter()
+            .filter_map(XMLNode::as_element)
+            .find(|e| e.attributes.get("id") == Some(&id))
+            .cloned()
+            .expect("filtro");
+        assert_eq!(filtro.attributes.get("in").map(String::as_str), Some("35"), "trecho em quadros da mídia");
+        assert_eq!(filtro.attributes.get("out").map(String::as_str), Some("39"));
+        assert_eq!(get_property(&filtro, "alpha").as_deref(), Some("0=1;-1=0"));
+        // de novo: substitui em vez de acumular
+        clip_fade(&mut doc, &v1, 0, FadeKind::Out, 8, FadeMode::Black).expect("fade de novo");
+        assert_eq!(list_filters(&doc, &v1, 0).len(), 1);
+        add_color_clip(&mut doc, "producer1", "#000000", "preto", 10).expect("cor");
+        add_clip_to_track(&mut doc, &a1, "producer1", 0, 9, 0).expect("áudio");
+        let (_, kid) = clip_fade(&mut doc, &a1, 0, FadeKind::In, 4, FadeMode::Alpha).expect("fade de áudio");
+        assert_eq!(kid, "fadein");
+    }
+
+    #[test]
+    fn imagem_e_cor_se_esticam_na_timeline() {
+        let (mut doc, v1, _) = doc_com_trilhas();
+        add_clip_to_track(&mut doc, &v1, "producer0", 0, 99, 0).expect("estica a cor");
+        assert_eq!(producer_in_out(&doc, "producer0"), Some((0, 99)));
+        assert_eq!(get_property(find_producer(&doc, "producer0").expect("p"), "resource").as_deref(), Some("0xff0000ff"));
+        assert!(is_image_path("/x/foto.PNG") && is_image_path("a.webp") && !is_image_path("a.mp4"));
+    }
+
+    #[test]
+    fn estilo_do_titulo_volta_igual_na_leitura() {
+        let mut doc = new_document(crate::model::profile::DEFAULT_PROFILE).expect("perfil");
+        let estilo = TitleStyle {
+            bold: true,
+            align: 1,
+            x: Some(100),
+            y: Some(800),
+            box_width: Some(900),
+            outline_width: 2.5,
+            outline_rgba: Some("0,0,0,255".to_string()),
+            background_rgba: Some("0,0,0,170".to_string()),
+            padding: 24,
+        };
+        add_title_clip(&mut doc, "producer0", "Olá", 25, "Sans", 60, "#ffffff", estilo.clone()).expect("título");
+        let lido = title_spec(find_producer(&doc, "producer0").expect("p")).expect("spec");
+        assert_eq!(lido.style.bold, estilo.bold);
+        assert_eq!(lido.style.align, 1);
+        assert_eq!(lido.style.x, Some(100));
+        assert_eq!(lido.style.y, Some(800));
+        assert_eq!(lido.style.outline_width, 2.5);
+        assert_eq!(lido.style.background_rgba.as_deref(), Some("0,0,0,170"));
+    }
 }

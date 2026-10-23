@@ -53,6 +53,7 @@ impl KdenliveMcpServer {
                         &familia,
                         params.font_size,
                         &params.color,
+                        document::TitleStyle::default(),
                     )?;
                     let indice = document::add_clip_to_track(
                         &mut session.doc,

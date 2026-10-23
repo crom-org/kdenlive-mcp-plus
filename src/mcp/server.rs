@@ -10,7 +10,8 @@
 //! mesmo jeito.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use rmcp::Json;
 use rmcp::ServerHandler;
@@ -43,15 +44,16 @@ pub struct KdenliveMcpServer {
     pub(crate) render_lock: Arc<Mutex<()>>,
     pub(crate) jobs: JobRegistry,
     pub(crate) queue: RenderQueue,
-    /// Se `true` (variável de ambiente `KDENLIVE_MCP_AUTOSAVE=1`), cada
-    /// edição bem-sucedida regrava o projeto no seu caminho — para poder
-    /// acompanhá-lo no Kdenlive (File > Revert) sem pedir `project_save`
-    /// a cada passo. Só vale depois de o projeto ter um caminho.
-    pub(crate) autosave: bool,
-    /// Com `KDENLIVE_MCP_AUTORELOAD=1` (que também liga o autosave), cada
-    /// gravação do projeto pede ao Kdenlive aberto que o recarregue (ver
-    /// `mcp::live`). O canal leva o caminho gravado à tarefa de fundo.
-    pub(crate) recarga: Option<tokio::sync::mpsc::UnboundedSender<PathBuf>>,
+    /// Se `true` (variável de ambiente `KDENLIVE_MCP_AUTOSAVE=1`, ou a
+    /// ferramenta `kdenlive_live`), cada edição bem-sucedida regrava o
+    /// projeto no seu caminho — para poder acompanhá-lo no Kdenlive sem
+    /// pedir `project_save` a cada passo. Só vale depois de o projeto ter um
+    /// caminho. Compartilhado entre os clones do servidor (D-060).
+    pub(crate) autosave: Arc<AtomicBool>,
+    /// Com `KDENLIVE_MCP_AUTORELOAD=1` (ou `kdenlive_live`), cada gravação do
+    /// projeto pede ao Kdenlive aberto que o recarregue (ver `mcp::live`). O
+    /// canal leva o caminho gravado à tarefa de fundo; `None` = desligado.
+    pub(crate) recarga: Arc<StdMutex<Option<tokio::sync::mpsc::UnboundedSender<PathBuf>>>>,
 }
 
 impl Default for KdenliveMcpServer {
@@ -74,8 +76,8 @@ impl KdenliveMcpServer {
             render_lock: Arc::new(Mutex::new(())),
             jobs: JobRegistry::new(),
             queue: RenderQueue::new(),
-            autosave: ligada("KDENLIVE_MCP_AUTOSAVE") || recarga.is_some(),
-            recarga,
+            autosave: Arc::new(AtomicBool::new(ligada("KDENLIVE_MCP_AUTOSAVE") || recarga.is_some())),
+            recarga: Arc::new(StdMutex::new(recarga)),
         }
     }
 
@@ -83,8 +85,32 @@ impl KdenliveMcpServer {
     /// automática estiver ligada). Não espera nem falha: é só um aviso à
     /// tarefa de fundo.
     pub(crate) fn pedir_recarga(&self, caminho: &Path) {
-        if let Some(tx) = &self.recarga {
+        if let Ok(guard) = self.recarga.lock()
+            && let Some(tx) = guard.as_ref()
+        {
             let _ = tx.send(caminho.to_path_buf());
+        }
+    }
+
+    /// `true` se a recarga automática do Kdenlive está ligada.
+    pub(crate) fn recarga_ligada(&self) -> bool {
+        self.recarga.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+
+    /// Liga a recarga automática (inicia a tarefa de fundo, se ainda não houver).
+    pub(crate) fn ligar_recarga(&self) {
+        if let Ok(mut guard) = self.recarga.lock()
+            && guard.is_none()
+            && let Ok(h) = tokio::runtime::Handle::try_current()
+        {
+            *guard = Some(super::live::iniciar(&h));
+        }
+    }
+
+    /// Desliga a recarga automática (soltar o canal encerra a tarefa de fundo).
+    pub(crate) fn desligar_recarga(&self) {
+        if let Ok(mut guard) = self.recarga.lock() {
+            *guard = None;
         }
     }
 }
@@ -97,6 +123,10 @@ pub struct ServerInfoOutput {
     pub versao_servidor: String,
     pub versao_libmlt: String,
     pub presets_disponiveis: Vec<String>,
+    /// Cada edição regrava o projeto (KDENLIVE_MCP_AUTOSAVE ou kdenlive_live).
+    pub autosave: bool,
+    /// O Kdenlive aberto recarrega a cada gravação (KDENLIVE_MCP_AUTORELOAD ou kdenlive_live).
+    pub autoreload: bool,
 }
 
 /// Resposta JSON de uma ferramenta: sempre um objeto (`{"ok": ...}`). Existe
@@ -170,7 +200,7 @@ impl KdenliveMcpServer {
         match guard.as_mut() {
             Some(session) => {
                 let resultado = f(session).map_err(|e| erro(e.to_string()));
-                if resultado.is_ok() && self.autosave {
+                if resultado.is_ok() && self.autosave.load(Ordering::SeqCst) {
                     match session.autosave() {
                         Ok(Some(gravado)) => self.pedir_recarga(&gravado),
                         Ok(None) => {}
@@ -203,6 +233,8 @@ impl KdenliveMcpServer {
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
+            autosave: self.autosave.load(Ordering::SeqCst),
+            autoreload: self.recarga_ligada(),
         })
     }
 
@@ -277,9 +309,12 @@ impl KdenliveMcpServer {
     #[tool(
         description = "Import a media file into the current project's bin. Requires an open \
          project (project_new/project_open). Parameters: path (required, path to the media \
-         file), name (optional display name; defaults to the file name). Probes the file's \
-         duration with ffprobe on a best-effort basis (never touches the libmlt engine \
-         directly). Returns ok:true with the new clip's id, or ok:false with an error."
+         file), name (optional display name; defaults to the file name), duration_frames \
+         (optional, still images only: png/jpg/webp/svg/bmp/tif become a native Kdenlive image \
+         clip of this length, default 5 seconds; an image can also be stretched on the timeline \
+         past it). Probes video/audio duration with ffprobe on a best-effort basis (never \
+         touches the libmlt engine directly). Returns ok:true with the new clip's id, or \
+         ok:false with an error."
     )]
     pub async fn bin_import_clip(
         &self,
@@ -350,9 +385,12 @@ impl KdenliveMcpServer {
          frames). If position is past the current end of the track, a gap (blank) is created to \
          fill it; placing a clip where it would overlap existing content on that track is an \
          error in this phase (no ripple/shift insert yet). Parameters: track_id, producer_id \
-         (the bin clip's id), in_frame, out_frame, position (all required). Returns ok:true with \
-         a clip reference string (\"<track_id>:<index>\", this server's own convention, used by \
-         other timeline tools), or ok:false with an error."
+         (the bin clip's id), in_frame, out_frame, position (all required), audio_track_id \
+         (optional: for a video clip with sound, an AUDIO track where its sound goes, linked to \
+         the video as a Kdenlive video+audio group — a video track never plays the clip's audio, \
+         so without this the clip is silent). Returns ok:true with a clip reference string \
+         (\"<track_id>:<index>\", this server's own convention, used by other timeline tools) and \
+         audio_clip_ref when audio_track_id was given, or ok:false with an error."
     )]
     pub async fn timeline_add_clip(
         &self,
@@ -652,9 +690,16 @@ impl KdenliveMcpServer {
     // -- Transições (Fase 2) ----------------------------------------------------
 
     #[tool(
-        description = "Create a blend transition (libmlt transition service, e.g. \"luma\" for \
-         crossfade/wipe) between two timeline tracks. Parameters: service, track_a, track_b (all \
-         required, track ids as returned by timeline_add_track/timeline_list)."
+        description = "Create a blend transition / Kdenlive composition (libmlt transition \
+         service, e.g. \"luma\" for a dissolve or wipe) between two timeline tracks. Parameters: \
+         service, track_a (the lower track, the one going out), track_b (the upper track, the \
+         one coming in) — all required, track ids as returned by timeline_add_track/timeline_list; \
+         in_frame and out_frame (optional, timeline frames, inclusive: the transition only \
+         applies in that range, which is how to crossfade two overlapping clips; without them it \
+         spans the whole timeline); kdenlive_id (optional; default \"dissolve\" for luma, or \
+         \"wipe\" when params has resource); params (optional object of extra properties, e.g. \
+         {\"softness\": \"0.2\", \"reverse\": \"1\", \"resource\": \"/path/to/wipe.pgm\"}). Returns \
+         the transition_id."
     )]
     pub async fn transition_add(&self, Parameters(params): Parameters<TransitionAddParams>) -> Json<Resposta> {
         Json(self.transition_add_impl(params).await.into())
@@ -970,11 +1015,15 @@ impl KdenliveMcpServer {
     #[tool(
         description = "Create a title clip with text, font, color and duration, in the project \
          bin, as a native Kdenlive title (\"kdenlivetitle\" producer, editable in Kdenlive's \
-         titler; the text is centered on screen and the font name is resolved to an installed \
-         font family). Parameters: text, duration_frames (both required), font_family \
-         (optional, default \"Sans\"), font_size (optional, default 48), color (optional, \
-         default opaque white \"0xffffffff\", format 0xRRGGBBAA). Place it on a track with \
-         timeline_add_clip like any other bin clip."
+         titler; the font name is resolved to an installed font family). Parameters: text, \
+         duration_frames (both required), font_family (optional, default \"Sans\"), font_size \
+         (optional, default 48), color (optional, default opaque white \"0xffffffff\", format \
+         0xRRGGBBAA or #RRGGBB), and optional styling: bold, align (\"left\", \"center\" default, \
+         \"right\"), x (left edge of the text box, px, default 0), y (vertical center of the \
+         text, px, default frame center), box_width (px, default up to the right edge), \
+         outline_width (px) and outline_color, background_color (a box behind the text, e.g. \
+         \"#000000AA\") and padding (px around the text, default 24). Use \\n for several lines. \
+         Place it on a track with timeline_add_clip like any other bin clip."
     )]
     pub async fn title_add(&self, Parameters(params): Parameters<TitleAddParams>) -> Json<Resposta> {
         Json(self.title_add_impl(params).await.into())
@@ -1182,6 +1231,116 @@ impl KdenliveMcpServer {
         Parameters(params): Parameters<ExportThumbnailParams>,
     ) -> Json<Resposta> {
         Json(self.export_thumbnail_impl(params).await.into())
+    }
+
+    // -- Recursos novos (D-053 a D-060) ------------------------------------------
+
+    #[tool(
+        description = "Fade a timeline clip in or out with Kdenlive's own fade effects \
+         (editable in Kdenlive): video clips use \"fade_from_black\"/\"fade_to_black\" \
+         (brightness), audio clips use \"fadein\"/\"fadeout\" (volume). Parameters: clip_ref, \
+         kind (\"in\" or \"out\"), duration_frames (all required), mode (optional, video only: \
+         \"alpha\" default — the clip becomes transparent and shows the track below; or \"black\" \
+         — from/to black). Calling again replaces the previous fade of the same kind."
+    )]
+    pub async fn clip_fade(&self, Parameters(params): Parameters<ClipFadeParams>) -> Json<Resposta> {
+        Json(self.clip_fade_impl(params).await.into())
+    }
+
+    #[tool(
+        description = "Animate a timeline clip's position, size, opacity and rotation over time \
+         (Kdenlive's Transform effect, libmlt \"qtblend\"), in one call. Parameters: clip_ref, \
+         keyframes (required: list of {frame, x, y, width, height, opacity?, rotation?}; frame \
+         counts from the START OF THE CLIP on the timeline, 0 = its first frame; x/y/width/height \
+         are the destination rectangle in project pixels; opacity 0..1, default 1; rotation in \
+         degrees around the center), interpolation (optional: \"linear\" default, \"smooth\" or \
+         \"hold\"). Replaces the clip's previous transform animation. Typical uses: fade in by \
+         opacity, pop/zoom in by scaling the rectangle, slide in from outside the frame."
+    )]
+    pub async fn clip_animate_transform(
+        &self,
+        Parameters(params): Parameters<ClipAnimateTransformParams>,
+    ) -> Json<Resposta> {
+        Json(self.clip_animate_transform_impl(params).await.into())
+    }
+
+    #[tool(
+        description = "Set many keyframes of one filter parameter in a single call (instead of \
+         one keyframe_set per keyframe). Parameters: clip_ref, filter_id, param, keyframes (list \
+         of {frame, value}) — all required; relative_to_clip (optional, default false: frame is \
+         the clip's MEDIA frame, like keyframe_set; true: frame counts from the clip's start on \
+         the timeline); replace (optional, default false: true drops the parameter's previous \
+         keyframes). Returns how many keyframes the parameter has."
+    )]
+    pub async fn keyframe_set_many(&self, Parameters(params): Parameters<KeyframeSetManyParams>) -> Json<Resposta> {
+        Json(self.keyframe_set_many_impl(params).await.into())
+    }
+
+    #[tool(
+        description = "Create a solid color clip in the bin (native Kdenlive color clip, libmlt \
+         \"color\" producer), e.g. a black background. Parameters: color (#RRGGBB, #RRGGBBAA or \
+         0xRRGGBBAA) and duration_frames (both required; it can be stretched on the timeline \
+         later), name (optional). Returns the new clip's id."
+    )]
+    pub async fn bin_add_color_clip(&self, Parameters(params): Parameters<BinAddColorClipParams>) -> Json<Resposta> {
+        Json(self.bin_add_color_clip_impl(params).await.into())
+    }
+
+    #[tool(
+        description = "Place several clips in one call (same fields as timeline_add_clip for \
+         each, including the optional audio_track_id). Parameter: clips (required list). All or \
+         nothing: if one clip fails, none is placed and the error says which one. Returns the \
+         clip_refs in order."
+    )]
+    pub async fn timeline_add_clips(&self, Parameters(params): Parameters<TimelineAddClipsParams>) -> Json<Resposta> {
+        Json(self.timeline_add_clips_impl(params).await.into())
+    }
+
+    #[tool(
+        description = "Fill a duration on a track by repeating (looping) a bin clip, e.g. a short \
+         animated background or a seamless loop. Parameters: track_id, producer_id, position, \
+         duration_frames (all required); in_frame/out_frame (optional, the looped part of the \
+         clip, default the whole bin clip); start_offset (optional, where inside that part the \
+         loop starts, default 0). Returns the clip_refs of the pieces placed back to back."
+    )]
+    pub async fn timeline_add_clip_loop(
+        &self,
+        Parameters(params): Parameters<TimelineAddClipLoopParams>,
+    ) -> Json<Resposta> {
+        Json(self.timeline_add_clip_loop_impl(params).await.into())
+    }
+
+    #[tool(
+        description = "Turn live preview in Kdenlive on or off for this session: when on, every \
+         successful edit re-saves the project and the Kdenlive window showing it reloads by \
+         itself (File > Revert triggered over D-Bus, never when Kdenlive has unsaved changes). \
+         The project must have been saved once (project_save with a path). Parameter: enabled \
+         (required, boolean). Same as starting the server with KDENLIVE_MCP_AUTORELOAD=1."
+    )]
+    pub async fn kdenlive_live(&self, Parameters(params): Parameters<KdenliveLiveParams>) -> Json<Resposta> {
+        Json(self.kdenlive_live_impl(params).await.into())
+    }
+
+    #[tool(
+        description = "Save the project now and ask the Kdenlive window showing it to reload it \
+         once (File > Revert over D-Bus). Takes no parameters. Returns resultado: \
+         \"recarregado\", \"kdenlive_com_o_projeto_nao_encontrado\", \
+         \"kdenlive_tem_alteracoes_nao_salvas\" (not reloaded, to keep the user's changes) or \
+         \"kdenlive_ocupado\"."
+    )]
+    pub async fn kdenlive_reload(&self) -> Json<Resposta> {
+        Json(self.kdenlive_reload_impl().await.into())
+    }
+
+    #[tool(
+        description = "Open the Kdenlive application (a window on the user's screen) with a \
+         project, unless a Kdenlive already shows it. Parameter: path (optional, default this \
+         session's saved project). The program is KDENLIVE_MCP_KDENLIVE, else `kdenlive` on the \
+         PATH, else the newest ~/Applications/kdenlive*.AppImage. Returns the process id (or \
+         ja_aberto:true). Combine with kdenlive_live to watch the edits as they happen."
+    )]
+    pub async fn kdenlive_open(&self, Parameters(params): Parameters<KdenliveOpenParams>) -> Json<Resposta> {
+        Json(self.kdenlive_open_impl(params).await.into())
     }
 }
 

@@ -6,9 +6,11 @@
 mod analise;
 mod bin;
 mod clip;
+mod efeitos;
 mod export;
 mod filter;
 mod guide;
+mod kdenlive_app;
 mod keyframe;
 mod marker;
 mod project;

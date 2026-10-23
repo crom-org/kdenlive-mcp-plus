@@ -8,12 +8,36 @@ use serde_json::{Value, json};
 
 use crate::mcp::fonts::resolve_font_family;
 use crate::mcp::params::{TitleAddParams, TitleUpdateParams};
-use crate::mcp::server::KdenliveMcpServer;
+use crate::mcp::server::{KdenliveMcpServer, erro};
 use crate::model::document;
 
 impl KdenliveMcpServer {
     pub(crate) async fn title_add_impl(&self, params: TitleAddParams) -> Value {
         let descricao = format!("criar título \"{}\"", params.text);
+        let align = match params.align.as_deref().unwrap_or("center") {
+            "left" => 1,
+            "right" => 2,
+            "center" => 4,
+            outro => return erro(format!("align inválido: \"{outro}\". Use \"left\", \"center\" ou \"right\"")),
+        };
+        let cor = |c: &Option<String>| -> Result<Option<String>, Value> {
+            c.as_deref().map(document::title_color).transpose().map_err(|e| erro(e.to_string()))
+        };
+        let (contorno, fundo) = match (cor(&params.outline_color), cor(&params.background_color)) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => return e,
+        };
+        let estilo = document::TitleStyle {
+            bold: params.bold.unwrap_or(false),
+            align,
+            x: params.x,
+            y: params.y,
+            box_width: params.box_width,
+            outline_width: params.outline_width.unwrap_or(0.0),
+            outline_rgba: contorno,
+            background_rgba: fundo,
+            padding: params.padding.unwrap_or(24).max(0),
+        };
         let familia = resolve_font_family(&params.font_family).await;
         let resultado = self
             .with_session_mut(|session| {
@@ -27,6 +51,7 @@ impl KdenliveMcpServer {
                     &familia,
                     params.font_size,
                     &params.color,
+                    estilo,
                 )?;
                 session.mark_modified();
                 Ok(id)

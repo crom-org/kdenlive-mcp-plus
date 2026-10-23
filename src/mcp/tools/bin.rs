@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::mcp::ffprobe;
 use crate::mcp::params::{
-    BinClipColorParams, BinClipIdParams, BinClipNoteParams, BinCreateFolderParams, BinImportClipParams,
+    BinAddColorClipParams, BinClipColorParams, BinClipIdParams, BinClipNoteParams, BinCreateFolderParams, BinImportClipParams,
     BinImportFolderParams, BinMoveClipParams, BinRenameParams,
 };
 use crate::mcp::server::{KdenliveMcpServer, erro};
@@ -34,16 +34,20 @@ fn clip_json(doc: &xmltree::Element, id: &str) -> Option<Value> {
 /// nesta fase).
 const EXTENSOES_MIDIA: &[&str] = &[
     "mp4", "mov", "mkv", "webm", "avi", "mxf", "wav", "mp3", "flac", "ogg", "m4a", "png", "jpg",
-    "jpeg",
+    "jpeg", "webp", "svg",
 ];
 
 impl KdenliveMcpServer {
     /// Lógica compartilhada por `bin_import_clip` e `bin_import_folder`.
-    async fn importar_um_clipe(&self, caminho: &Path, nome: Option<String>) -> Value {
+    async fn importar_um_clipe(&self, caminho: &Path, nome: Option<String>, duracao_imagem: Option<i64>) -> Value {
         let fps = match self.with_session(|s| document::profile_fps(&s.doc)).await {
             Ok(fps) => fps,
             Err(valor_erro) => return valor_erro,
         };
+        let resource = caminho.display().to_string();
+        if document::is_image_path(&resource) {
+            return self.importar_imagem(caminho, nome, duracao_imagem.unwrap_or((fps * 5.0).round() as i64)).await;
+        }
 
         let quadros = ffprobe::probe_duration_frames(caminho, fps).await;
         let (in_frame, out_frame) = match quadros {
@@ -61,7 +65,6 @@ impl KdenliveMcpServer {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| caminho.display().to_string())
         });
-        let resource = caminho.display().to_string();
         let descricao = format!("importar clipe \"{nome}\"");
 
         let resultado = self
@@ -86,12 +89,52 @@ impl KdenliveMcpServer {
         }
     }
 
+    /// Imagem parada: clipe `qimage` com a duração pedida (D-056).
+    async fn importar_imagem(&self, caminho: &Path, nome: Option<String>, duracao: i64) -> Value {
+        let nome = nome.unwrap_or_else(|| {
+            caminho.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| caminho.display().to_string())
+        });
+        let resource = caminho.display().to_string();
+        let descricao = format!("importar imagem \"{nome}\"");
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                let id = session.alloc_producer_id();
+                document::add_image_clip(&mut session.doc, &id, &resource, &nome, duracao)?;
+                session.mark_modified();
+                Ok(id)
+            })
+            .await;
+        match resultado {
+            Ok(id) => json!({ "ok": true, "clip_id": id, "in_frame": 0, "out_frame": duracao - 1, "tipo": "imagem" }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    pub(crate) async fn bin_add_color_clip_impl(&self, params: BinAddColorClipParams) -> Value {
+        let nome = params.name.clone().unwrap_or_else(|| format!("Cor {}", params.color));
+        let descricao = format!("criar clipe de cor \"{nome}\"");
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                let id = session.alloc_producer_id();
+                document::add_color_clip(&mut session.doc, &id, &params.color, &nome, params.duration_frames)?;
+                session.mark_modified();
+                Ok(id)
+            })
+            .await;
+        match resultado {
+            Ok(id) => json!({ "ok": true, "clip_id": id, "in_frame": 0, "out_frame": params.duration_frames - 1, "nome": nome }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
     pub(crate) async fn bin_import_clip_impl(&self, params: BinImportClipParams) -> Value {
         let caminho = PathBuf::from(&params.path);
         if !caminho.exists() {
             return erro(format!("arquivo de mídia não encontrado: {}", caminho.display()));
         }
-        self.importar_um_clipe(&caminho, params.name.clone()).await
+        self.importar_um_clipe(&caminho, params.name.clone(), params.duration_frames).await
     }
 
     pub(crate) async fn bin_import_folder_impl(&self, params: BinImportFolderParams) -> Value {
@@ -128,7 +171,7 @@ impl KdenliveMcpServer {
         let mut importados = Vec::with_capacity(arquivos.len());
         let mut falhas = Vec::new();
         for arquivo in arquivos {
-            let resultado = self.importar_um_clipe(&arquivo, None).await;
+            let resultado = self.importar_um_clipe(&arquivo, None, None).await;
             if resultado["ok"] == json!(true) {
                 importados.push(resultado);
             } else {

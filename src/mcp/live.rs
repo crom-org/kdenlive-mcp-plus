@@ -181,7 +181,10 @@ async fn propriedade_da_janela(conexao: &str, propriedade: &str) -> Result<Strin
 }
 
 /// Procura o Kdenlive com `caminho` aberto e pede que ele recarregue o arquivo.
-pub async fn recarregar(caminho: &Path) -> Result<Resultado, String> {
+/// Procura, no D-Bus da sessão, o Kdenlive que mostra `caminho`. Devolve a
+/// conexão dele (se achou) e se alguma conexão não respondeu a tempo
+/// (Kdenlive possivelmente ocupado carregando).
+pub async fn conexao_do_projeto(caminho: &Path) -> Result<(Option<String>, bool), String> {
     let lista = busctl(&["list"], LIMITE_CONSULTA).await?;
     let mut ocupado = false;
     for conexao in parse_conexoes(&lista) {
@@ -196,9 +199,44 @@ pub async fn recarregar(caminho: &Path) -> Result<Resultado, String> {
                 continue;
             }
         };
-        if !titulo_e_do_projeto(&titulo, caminho) {
-            continue;
+        if titulo_e_do_projeto(&titulo, caminho) {
+            return Ok((Some(conexao), ocupado));
         }
+    }
+    Ok((None, ocupado))
+}
+
+/// Variáveis de ambiente que faltam para abrir o Kdenlive (uma janela) a
+/// partir de um servidor iniciado com ambiente enxuto (D-048): `DISPLAY`
+/// (`:0`, se existir o socket do X), `DBUS_SESSION_BUS_ADDRESS` e
+/// `XDG_RUNTIME_DIR` (os padrões do systemd), cada uma só se não estiver
+/// definida.
+pub fn ambiente_para_abrir_kdenlive() -> Vec<(String, String)> {
+    let definida = |nome: &str| std::env::var_os(nome).is_some();
+    let mut vars = Vec::new();
+    if !definida("DISPLAY") && !definida("WAYLAND_DISPLAY") && Path::new("/tmp/.X11-unix/X0").exists() {
+        vars.push(("DISPLAY".to_string(), ":0".to_string()));
+    }
+    if let Some(uid) = uid_do_processo() {
+        let runtime = format!("/run/user/{uid}");
+        if let Some(endereco) = endereco_padrao_do_barramento(
+            definida("DBUS_SESSION_BUS_ADDRESS"),
+            definida("XDG_RUNTIME_DIR"),
+            uid,
+            |s| Path::new(s).exists(),
+        ) {
+            vars.push(("DBUS_SESSION_BUS_ADDRESS".to_string(), endereco));
+        }
+        if !definida("XDG_RUNTIME_DIR") && Path::new(&runtime).is_dir() {
+            vars.push(("XDG_RUNTIME_DIR".to_string(), runtime));
+        }
+    }
+    vars
+}
+
+pub async fn recarregar(caminho: &Path) -> Result<Resultado, String> {
+    let (achada, ocupado) = conexao_do_projeto(caminho).await?;
+    if let Some(conexao) = achada {
         let modificado = match propriedade_da_janela(&conexao, "windowModified").await {
             Ok(saida) => parse_booleano(&saida).unwrap_or(false),
             Err(e) if e_falta_de_resposta(&e) => return Ok(Resultado::Ocupado),
