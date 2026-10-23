@@ -210,7 +210,7 @@ async fn fluxo_completo_projeto_bin_timeline_export_e_render() {
     let client = iniciar_cliente().await;
 
     // 1. project_new
-    let resp = chamar(&client, "project_new", serde_json::json!({})).await;
+    let resp = chamar(&client, "project_new", serde_json::json!({ "default_tracks": false })).await;
     assert_ok(&resp, "project_new");
     assert_eq!(resp["trilhas"], Value::from(0));
     assert_eq!(resp["clipes_na_bin"], Value::from(0));
@@ -566,7 +566,7 @@ async fn render_progress_e_render_cancel_acompanham_um_job_assincrono() {
 async fn fase2_trilha_clipe_sessao_filtros_transicoes_guias_marcadores() {
     let client = iniciar_cliente().await;
 
-    chamar(&client, "project_new", serde_json::json!({})).await;
+    chamar(&client, "project_new", serde_json::json!({ "default_tracks": false })).await;
 
     // --- trilhas -------------------------------------------------------
     let t0 = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "video" })).await;
@@ -831,7 +831,7 @@ async fn fase2_perfis_pastas_da_bin_importar_pasta_e_montagem_em_lote() {
         "esperava \"atsc_720p_25\" na lista de perfis: {perfis}"
     );
 
-    chamar(&client, "project_new", serde_json::json!({ "profile": "atsc_720p_25" })).await;
+    chamar(&client, "project_new", serde_json::json!({ "profile": "atsc_720p_25", "default_tracks": false })).await;
     let perfil_atual = chamar(&client, "project_get_profile", serde_json::json!({})).await;
     assert_ok(&perfil_atual, "project_get_profile");
     assert_eq!(perfil_atual["perfil"]["largura"], Value::from(1280));
@@ -948,7 +948,7 @@ async fn fase2_perfis_pastas_da_bin_importar_pasta_e_montagem_em_lote() {
 async fn fase2_mover_aparar_dividir_remover_clipe_e_posicao_zoom() {
     let client = iniciar_cliente().await;
 
-    chamar(&client, "project_new", serde_json::json!({})).await;
+    chamar(&client, "project_new", serde_json::json!({ "default_tracks": false })).await;
     let trilha = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "video" })).await;
     let track_id = trilha["track_id"].as_str().unwrap().to_string();
 
@@ -1222,7 +1222,7 @@ async fn render_queue_processa_em_sequencia_e_stop_encerra_de_verdade() {
 async fn fase2_titulos_keyframes_legendas_audio_transformacao_e_miniatura() {
     let client = iniciar_cliente().await;
 
-    chamar(&client, "project_new", serde_json::json!({})).await;
+    chamar(&client, "project_new", serde_json::json!({ "default_tracks": false })).await;
 
     // --- títulos -----------------------------------------------------------
     let titulo = chamar(
@@ -1407,4 +1407,189 @@ async fn autosave_regrava_o_arquivo_a_cada_edicao() {
 
     client.cancel().await.expect("fechamento limpo do cliente");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Cria um `busctl` falso que registra cada chamada em `log` e responde
+/// como se houvesse um Kdenlive (conexão `:1.5`) com o projeto `ao_vivo`
+/// aberto — `modificado` vira o valor de `windowModified`.
+/// `falhas_iniciais`: quantas consultas ao título da janela "demoram demais"
+/// antes de ela responder (simula o Kdenlive ocupado carregando o projeto).
+fn busctl_falso(dir: &std::path::Path, log: &std::path::Path, modificado: bool, falhas_iniciais: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("busctl_falso.sh");
+    let corpo = format!(
+        r#"#!/bin/bash
+echo "${{@:4}}" >> "{log}"
+case "$4" in
+  list) echo '[{{"name":":1.5","pid":1,"process":"kdenlive","user":"j"}},{{"name":":1.6","pid":2,"process":"outro","user":"j"}}]' ;;
+  get-property)
+    if [ "$5" != ":1.5" ]; then echo "Object does not exist" >&2; exit 1; fi
+    case "$8" in
+      windowTitle)
+        if [ "$(wc -l < "{contador}" 2>/dev/null || echo 0)" -lt {falhas} ]; then
+          echo x >> "{contador}"; echo "Connection timed out" >&2; exit 1
+        fi
+        echo '{{"type":"s","data":"ao_vivo [*]/ HD 1080p 25 fps"}}' ;;
+      windowModified) echo '{{"type":"b","data":{modificado}}}' ;;
+    esac ;;
+  call) echo "(chamado)" ;;
+esac
+"#,
+        log = log.display(),
+        modificado = modificado,
+        contador = dir.join("falhas.cnt").display(),
+        falhas = falhas_iniciais,
+    );
+    std::fs::write(&script, corpo).expect("grava o busctl falso");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("torna executável");
+    script
+}
+
+/// Espera (até ~8 s) o log do `busctl` falso satisfazer `condicao`.
+async fn esperar_log(log: &std::path::Path, condicao: impl Fn(&str) -> bool) -> String {
+    for _ in 0..80 {
+        let texto = std::fs::read_to_string(log).unwrap_or_default();
+        if condicao(&texto) {
+            return texto;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    std::fs::read_to_string(log).unwrap_or_default()
+}
+
+const CHAMADA_REVERT: &str = "call :1.5 /kdenlive/MainWindow_1/actions/file_revert org.qtproject.Qt.QAction trigger";
+
+/// Com `KDENLIVE_MCP_AUTORELOAD=1`, depois de cada edição o servidor acha o
+/// Kdenlive com o projeto aberto (pelo título da janela) e aciona o
+/// File > Revert dele pelo D-Bus — aqui, contra um `busctl` falso.
+#[tokio::test]
+async fn autoreload_aciona_o_revert_do_kdenlive_que_mostra_o_projeto() {
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_autoreload_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+    let log = dir.join("busctl.log");
+    let falso = busctl_falso(&dir, &log, false, 0);
+    let alvo = dir.join("ao_vivo.kdenlive");
+
+    let client = iniciar_cliente_com_env(&[
+        ("KDENLIVE_MCP_AUTORELOAD", "1"),
+        ("KDENLIVE_MCP_BUSCTL", &falso.to_string_lossy()),
+    ])
+    .await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    assert_ok(
+        &chamar(&client, "project_save", serde_json::json!({ "path": alvo.to_string_lossy() })).await,
+        "project_save",
+    );
+    let texto = esperar_log(&log, |t| t.contains(CHAMADA_REVERT)).await;
+    assert!(texto.contains(CHAMADA_REVERT), "project_save deveria ter pedido a recarga; log:\n{texto}");
+    let chamadas_apos_save = texto.matches(CHAMADA_REVERT).count();
+
+    // o autosave liga junto: uma edição regrava e recarrega de novo
+    assert_ok(
+        &chamar(&client, "guide_add", serde_json::json!({ "position": 10, "comment": "ao vivo" })).await,
+        "guide_add",
+    );
+    let texto = esperar_log(&log, |t| t.matches(CHAMADA_REVERT).count() > chamadas_apos_save).await;
+    assert!(
+        texto.matches(CHAMADA_REVERT).count() > chamadas_apos_save,
+        "a edição deveria ter pedido outra recarga; log:\n{texto}"
+    );
+    assert!(std::fs::read_to_string(&alvo).expect("lê o arquivo").contains("ao vivo"));
+
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Se o Kdenlive tem alterações não salvas no projeto, o servidor não
+/// recarrega (apagaria o trabalho do usuário e abriria um diálogo).
+#[tokio::test]
+async fn autoreload_nao_recarrega_se_o_kdenlive_tem_alteracoes_nao_salvas() {
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_autoreload_mod_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+    let log = dir.join("busctl.log");
+    let falso = busctl_falso(&dir, &log, true, 0);
+    let alvo = dir.join("ao_vivo.kdenlive");
+
+    let client = iniciar_cliente_com_env(&[
+        ("KDENLIVE_MCP_AUTORELOAD", "1"),
+        ("KDENLIVE_MCP_BUSCTL", &falso.to_string_lossy()),
+    ])
+    .await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    assert_ok(
+        &chamar(&client, "project_save", serde_json::json!({ "path": alvo.to_string_lossy() })).await,
+        "project_save",
+    );
+    // espera o servidor consultar o estado da janela; só então vale conferir
+    let texto = esperar_log(&log, |t| t.contains("windowModified")).await;
+    assert!(texto.contains("windowModified"), "o servidor deveria ter consultado a janela; log:\n{texto}");
+    assert!(!texto.contains(CHAMADA_REVERT), "não deveria recarregar com alterações não salvas:\n{texto}");
+
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Kdenlive ocupado (carregando): a consulta ao título "demora demais"; o
+/// servidor espera e tenta de novo em vez de desistir — o projeto acaba
+/// recarregado com o estado mais recente.
+#[tokio::test]
+async fn autoreload_tenta_de_novo_quando_o_kdenlive_esta_ocupado() {
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_autoreload_busy_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+    let log = dir.join("busctl.log");
+    let falso = busctl_falso(&dir, &log, false, 2);
+    let alvo = dir.join("ao_vivo.kdenlive");
+
+    let client = iniciar_cliente_com_env(&[
+        ("KDENLIVE_MCP_AUTORELOAD", "1"),
+        ("KDENLIVE_MCP_BUSCTL", &falso.to_string_lossy()),
+    ])
+    .await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    assert_ok(
+        &chamar(&client, "project_save", serde_json::json!({ "path": alvo.to_string_lossy() })).await,
+        "project_save",
+    );
+    let texto = esperar_log(&log, |t| t.contains(CHAMADA_REVERT)).await;
+    assert!(texto.contains(CHAMADA_REVERT), "depois de ficar ocupado, deveria ter recarregado; log:\n{texto}");
+    assert!(
+        texto.matches("windowTitle").count() >= 3,
+        "deveria ter consultado o título pelo menos 3 vezes (2 falhas + 1 sucesso); log:\n{texto}"
+    );
+
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// O Kdenlive 26 fecha ao abrir um projeto sem trilhas (verificado abrindo o
+/// arquivo de verdade), então `project_new` já cria V1 e A1 — e
+/// `project_validate` avisa quando um projeto fica sem trilha nenhuma.
+#[tokio::test]
+async fn project_new_cria_trilhas_padrao_e_validate_avisa_projeto_sem_trilhas() {
+    let client = iniciar_cliente().await;
+
+    let novo = chamar(&client, "project_new", serde_json::json!({})).await;
+    assert_ok(&novo, "project_new");
+    assert_eq!(novo["trilhas"], Value::from(2));
+    let criadas = novo["new_tracks"].as_array().expect("new_tracks");
+    assert_eq!(criadas.len(), 2);
+    assert_eq!(criadas[0]["kind"], Value::from("video"));
+    assert_eq!(criadas[1]["kind"], Value::from("audio"));
+    let validacao = chamar(&client, "project_validate", serde_json::json!({})).await;
+    assert!(
+        !validacao["problemas"].to_string().contains("nenhuma trilha"),
+        "com as trilhas padrão não deveria avisar: {validacao}"
+    );
+
+    let vazio = chamar(&client, "project_new", serde_json::json!({ "default_tracks": false })).await;
+    assert_ok(&vazio, "project_new sem trilhas");
+    assert_eq!(vazio["trilhas"], Value::from(0));
+    assert_eq!(vazio["new_tracks"].as_array().map(Vec::len), Some(0));
+    let validacao = chamar(&client, "project_validate", serde_json::json!({})).await;
+    assert!(
+        validacao["problemas"].to_string().contains("nenhuma trilha"),
+        "projeto sem trilhas deveria gerar aviso: {validacao}"
+    );
+
+    client.cancel().await.expect("fechamento limpo do cliente");
 }

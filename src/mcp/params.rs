@@ -44,6 +44,12 @@ pub struct ProjectNewParams {
     /// project_list_profiles para ver os nomes válidos.
     #[serde(default = "profile_padrao")]
     pub profile: String,
+    /// Se `true` (padrão), o projeto já nasce com uma trilha de vídeo e uma
+    /// de áudio, como o Kdenlive faz: o Kdenlive 26 fecha ao abrir um projeto
+    /// sem nenhuma trilha. Use `false` só para um projeto que nunca será
+    /// aberto no Kdenlive (ou que receberá trilhas antes de ser salvo).
+    #[serde(default = "verdadeiro")]
+    pub default_tracks: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

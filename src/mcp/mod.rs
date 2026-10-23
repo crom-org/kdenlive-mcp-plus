@@ -2,6 +2,7 @@
 
 mod ffprobe;
 mod fonts;
+pub mod live;
 mod params;
 pub mod server;
 mod tools;

@@ -45,7 +45,7 @@ Compile (`cargo build --release`) e adicione o servidor ao arquivo de configura�
     "kdenlive-mcp-plus": {
       "command": "/caminho/absoluto/para/kdenlive-mcp-plus/target/release/kdenlive-mcp-plus",
       "args": ["mcp"],
-      "env": { "KDENLIVE_MCP_AUTOSAVE": "1" }
+      "env": { "KDENLIVE_MCP_AUTORELOAD": "1" }
     }
   }
 }
@@ -53,14 +53,20 @@ Compile (`cargo build --release`) e adicione o servidor ao arquivo de configura�
 
 ## Acompanhando o vídeo sendo criado, com o Kdenlive aberto
 
-O Kdenlive não tem API de controle remoto e não detecta sozinho que o arquivo do projeto mudou no disco, então o fluxo é este:
+Com `KDENLIVE_MCP_AUTORELOAD=1` (como no JSON acima) o servidor grava o projeto a cada edição e **pede ao Kdenlive aberto que o recarregue sozinho** (a mesma ação do File ▸ Revert, pelo D-Bus — sem patch no Kdenlive e sem clicar em nada). O fluxo:
 
-1. Peça ao Claude para criar o projeto e salvar num caminho fixo (ex. "crie um projeto novo e salve em `~/Vídeos/meu-video.kdenlive`" — a ferramenta `project_save`).
-2. Abra esse mesmo arquivo no Kdenlive.
-3. Com `KDENLIVE_MCP_AUTOSAVE=1` (como no JSON acima), **cada edição que o Claude faz regrava o arquivo sozinha** (de forma atômica, o Kdenlive nunca lê um arquivo pela metade). Sem essa variável, peça `project_save` depois de cada etapa.
-4. No Kdenlive, use **File ▸ Revert** para recarregar a versão mais recente do disco e ver o que o Claude acabou de fazer. O Kdenlive marca o projeto como modificado ao abrir um arquivo gerado por fora, então o Revert pede confirmação ("This will delete all changes…"): clique em **Continue**. Se você mexeu no projeto dentro do Kdenlive, salve (Ctrl+S) antes — o Revert descarta alterações não salvas.
+1. Peça ao Claude para criar o projeto e salvar num caminho fixo (ex. "crie um projeto novo e salve em `~/Vídeos/meu-video.kdenlive`" — a ferramenta `project_save`). O projeto novo já vem com uma trilha de vídeo e uma de áudio.
+2. Abra esse mesmo arquivo no Kdenlive e espere ele terminar de carregar.
+3. Peça as edições. A cada uma, o Kdenlive recarrega e mostra o resultado (a timeline volta ao início, porque é um Revert).
 
-Para não editar o mesmo projeto nos dois lugares ao mesmo tempo, deixe o Claude montar e use o Kdenlive para conferir; edições feitas pela interface do Kdenlive só chegam ao Claude se ele reabrir o arquivo (`project_open`).
+Cuidados:
+
+- **Se você mexer no projeto dentro do Kdenlive e não salvar**, o servidor não recarrega (para não apagar o seu trabalho) e avisa no log do servidor. Salve (Ctrl+S) ou desfaça, e o próximo passo do Claude volta a recarregar.
+- Não abra nem feche projetos no Kdenlive enquanto o Claude está editando: recarregar durante o carregamento de outro projeto pode travar o Kdenlive.
+- O recarregamento usa o `busctl` (parte do systemd) e o D-Bus da sua sessão. Sem eles, ou sem o Kdenlive aberto, o servidor segue editando normalmente e você usa **File ▸ Revert** à mão.
+- Só com `KDENLIVE_MCP_AUTOSAVE=1` (sem `AUTORELOAD`) o arquivo é regravado a cada edição, mas o Kdenlive só atualiza quando você usa File ▸ Revert. Sem nenhuma das duas, peça `project_save` depois de cada etapa.
+
+Edições feitas pela interface do Kdenlive só chegam ao Claude se ele reabrir o arquivo (`project_open`); deixe o Claude montar e use o Kdenlive para conferir.
 
 ## Configuração no Claude Code
 

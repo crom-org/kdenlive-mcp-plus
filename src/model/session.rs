@@ -46,7 +46,8 @@ impl Session {
         Ok(Self::from_doc(doc, Some(path.to_path_buf())))
     }
 
-    fn from_doc(doc: Element, path: Option<PathBuf>) -> Self {
+    fn from_doc(mut doc: Element, path: Option<PathBuf>) -> Self {
+        document::ensure_document_id(&mut doc);
         let next_producer_n = document::next_available_n(&doc, "producer", "producer");
         let next_track_n = document::next_available_n(&doc, "tractor", "track");
         Self {
@@ -107,11 +108,12 @@ impl Session {
 
     /// Regrava o projeto no caminho de origem, se ele tiver um e houver
     /// alterações não salvas. Usado pelo modo de autosave do servidor.
-    pub fn autosave(&mut self) -> Result<(), ModelError> {
+    /// Devolve o caminho gravado, ou `None` se não havia nada a fazer.
+    pub fn autosave(&mut self) -> Result<Option<PathBuf>, ModelError> {
         if self.modified && self.path.is_some() {
-            self.save(None)?;
+            return self.save(None).map(Some);
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Registra o estado atual no histórico de undo, com uma descrição

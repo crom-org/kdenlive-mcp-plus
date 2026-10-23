@@ -20,7 +20,7 @@ Lista de checklist de funcionalidade (decisão D-007); não é código copiado (
 
 | Nome | Descrição | Fase | Status |
 |---|---|---|---|
-| `project_new` | Cria uma nova sessão/projeto do Kdenlive. | 1 | testada |
+| `project_new` | Cria uma nova sessão/projeto do Kdenlive, já com uma trilha de vídeo e uma de áudio (`default_tracks=false` para vazio; o Kdenlive 26 fecha ao abrir projeto sem trilhas, D-044). | 1 | testada |
 | `project_open` | Carrega um projeto existente na sessão. Abre o `.kdenlive`/MLT XML nativo diretamente (diferente do original, que só aceitava `.kdenlive-cli.json`). | 1 | testada |
 | `project_save` | Persiste o estado atual do projeto num arquivo. | 1 | testada |
 | `project_get_info` | Retorna metadados do projeto: perfil, contagem de trilhas, contagem de clipes na bin, duração. | 1 | testada |

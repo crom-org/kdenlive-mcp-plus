@@ -9,6 +9,7 @@
 //! protocolo MCP (decisão D-017), para o agente tratar sucesso e erro do
 //! mesmo jeito.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rmcp::Json;
@@ -47,6 +48,10 @@ pub struct KdenliveMcpServer {
     /// acompanhá-lo no Kdenlive (File > Revert) sem pedir `project_save`
     /// a cada passo. Só vale depois de o projeto ter um caminho.
     pub(crate) autosave: bool,
+    /// Com `KDENLIVE_MCP_AUTORELOAD=1` (que também liga o autosave), cada
+    /// gravação do projeto pede ao Kdenlive aberto que o recarregue (ver
+    /// `mcp::live`). O canal leva o caminho gravado à tarefa de fundo.
+    pub(crate) recarga: Option<tokio::sync::mpsc::UnboundedSender<PathBuf>>,
 }
 
 impl Default for KdenliveMcpServer {
@@ -57,12 +62,29 @@ impl Default for KdenliveMcpServer {
 
 impl KdenliveMcpServer {
     pub fn new() -> Self {
+        let ligada = |nome: &str| matches!(std::env::var(nome).as_deref(), Ok("1" | "true" | "TRUE"));
+        // sem runtime (ex.: fora do tokio) não há onde rodar a tarefa de fundo
+        let recarga = if ligada("KDENLIVE_MCP_AUTORELOAD") {
+            tokio::runtime::Handle::try_current().ok().map(|h| super::live::iniciar(&h))
+        } else {
+            None
+        };
         Self {
             session: Arc::new(Mutex::new(None)),
             render_lock: Arc::new(Mutex::new(())),
             jobs: JobRegistry::new(),
             queue: RenderQueue::new(),
-            autosave: matches!(std::env::var("KDENLIVE_MCP_AUTOSAVE").as_deref(), Ok("1" | "true" | "TRUE")),
+            autosave: ligada("KDENLIVE_MCP_AUTOSAVE") || recarga.is_some(),
+            recarga,
+        }
+    }
+
+    /// Pede ao Kdenlive aberto que recarregue `caminho` (se a recarga
+    /// automática estiver ligada). Não espera nem falha: é só um aviso à
+    /// tarefa de fundo.
+    pub(crate) fn pedir_recarga(&self, caminho: &Path) {
+        if let Some(tx) = &self.recarga {
+            let _ = tx.send(caminho.to_path_buf());
         }
     }
 }
@@ -123,13 +145,14 @@ impl KdenliveMcpServer {
         match guard.as_mut() {
             Some(session) => {
                 let resultado = f(session).map_err(|e| erro(e.to_string()));
-                if resultado.is_ok()
-                    && self.autosave
-                    && let Err(e) = session.autosave()
-                {
-                    // A edição já foi aplicada; falhar o autosave não deve
-                    // virar erro da ferramenta (o agente pode chamar project_save).
-                    eprintln!("kdenlive-mcp-plus: autosave falhou: {e}");
+                if resultado.is_ok() && self.autosave {
+                    match session.autosave() {
+                        Ok(Some(gravado)) => self.pedir_recarga(&gravado),
+                        Ok(None) => {}
+                        // A edição já foi aplicada; falhar o autosave não deve
+                        // virar erro da ferramenta (o agente pode chamar project_save).
+                        Err(e) => eprintln!("kdenlive-mcp-plus: autosave falhou: {e}"),
+                    }
                 }
                 resultado
             }
@@ -161,10 +184,12 @@ impl KdenliveMcpServer {
     // -- Projeto --------------------------------------------------------
 
     #[tool(
-        description = "Create a new, empty project in this server's session (replacing any \
-         previously open project). Parameters: profile (optional, default \"atsc_1080p_25\"; a \
-         real libmlt profile name — width/height/fps/aspect ratio). Returns ok:true with the \
-         profile summary, or ok:false with an error listing valid profile names."
+        description = "Create a new project in this server's session (replacing any previously \
+         open project). Parameters: profile (optional, default \"atsc_1080p_25\"; a real libmlt \
+         profile name — width/height/fps/aspect ratio), default_tracks (optional, default true: \
+         start with one video track and one audio track, returned in new_tracks, because Kdenlive \
+         crashes when it opens a project that has no tracks at all). Returns ok:true with the \
+         project summary, or ok:false with an error listing valid profile names."
     )]
     pub async fn project_new(&self, Parameters(params): Parameters<ProjectNewParams>) -> Json<Value> {
         Json(self.project_new_impl(params).await)

@@ -67,6 +67,31 @@ pub fn new_uuid() -> String {
     format!("{{{}-{}-{}-{}-{}}}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
 }
 
+/// Identificador do documento no mesmo formato que o Kdenlive gera: os
+/// milissegundos desde a época Unix, como texto decimal. O Kdenlive usa esse
+/// número para nomear as pastas de cache do projeto, e **um arquivo sem ele
+/// é tratado como "modificado" ao abrir** — o que faz o File > Revert (e o
+/// recarregamento automático, D-042) pedir uma confirmação em vez de recarregar.
+pub fn new_document_id() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    ms.to_string()
+}
+
+const PROP_DOCUMENT_ID: &str = "kdenlive:docproperties.documentid";
+
+/// Garante que a bin tenha `documentid` (ver [`new_document_id`]). Não
+/// mexe num id que já exista — ele vem do Kdenlive ou de uma sessão anterior.
+pub fn ensure_document_id(root: &mut Element) {
+    if let Some(bin) = main_bin_mut(root)
+        && get_property(bin, PROP_DOCUMENT_ID).is_none()
+    {
+        set_property(bin, PROP_DOCUMENT_ID, &new_document_id());
+    }
+}
+
 fn element_with_props(tag: &str, attrs: &[(&str, &str)], props: &[(&str, &str)]) -> Element {
     let mut el = Element::new(tag);
     for (k, v) in attrs {
@@ -227,6 +252,7 @@ pub fn new_document(profile_name: &str) -> Result<Element, ModelError> {
             ("kdenlive:docproperties.opensequences", seq),
             ("kdenlive:docproperties.activetimeline", seq),
             ("kdenlive:docproperties.profile", profile_name),
+            (PROP_DOCUMENT_ID, new_document_id().as_str()),
             // Sem isto o MLT não "retém" esta playlist e o Kdenlive abre
             // com a bin vazia — a causa de os clipes sumirem da timeline.
             ("xml_retain", "1"),
@@ -2412,6 +2438,23 @@ mod tests {
         assert!(main_bin(&doc).is_some());
         assert!(main_tractor(&doc).is_some());
         assert!(track_ids(&doc).is_empty());
+    }
+
+    #[test]
+    fn documento_novo_tem_documentid_numerico_e_ensure_nao_sobrescreve() {
+        let mut doc = new_document(crate::model::profile::DEFAULT_PROFILE).expect("perfil padrão válido");
+        let id = get_property(main_bin(&doc).unwrap(), PROP_DOCUMENT_ID).expect("documentid presente");
+        assert!(id.parse::<u64>().is_ok(), "documentid precisa ser numérico, como no Kdenlive: {id}");
+
+        // já existe: não troca
+        ensure_document_id(&mut doc);
+        assert_eq!(get_property(main_bin(&doc).unwrap(), PROP_DOCUMENT_ID), Some(id));
+
+        // ausente (arquivo de uma versão antiga): é criado
+        remove_property(main_bin_mut(&mut doc).unwrap(), PROP_DOCUMENT_ID);
+        assert!(get_property(main_bin(&doc).unwrap(), PROP_DOCUMENT_ID).is_none());
+        ensure_document_id(&mut doc);
+        assert!(get_property(main_bin(&doc).unwrap(), PROP_DOCUMENT_ID).is_some());
     }
 
     #[test]

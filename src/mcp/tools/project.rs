@@ -43,11 +43,22 @@ fn resumo_sessao(session: &Session) -> Value {
 
 impl KdenliveMcpServer {
     pub(crate) async fn project_new_impl(&self, params: ProjectNewParams) -> Value {
-        let nova = match Session::new(&params.profile) {
+        let mut nova = match Session::new(&params.profile) {
             Ok(s) => s,
             Err(e) => return erro(e.to_string()),
         };
-        let resumo = resumo_sessao(&nova);
+        let mut trilhas_novas: Vec<Value> = Vec::new();
+        if params.default_tracks {
+            for (tipo, nome) in [(document::TrackKind::Video, "video"), (document::TrackKind::Audio, "audio")] {
+                let id = nova.alloc_track_id();
+                if let Err(e) = document::add_track(&mut nova.doc, &id, tipo) {
+                    return erro(e.to_string());
+                }
+                trilhas_novas.push(json!({ "track_id": id, "kind": nome }));
+            }
+        }
+        let mut resumo = resumo_sessao(&nova);
+        resumo["new_tracks"] = json!(trilhas_novas);
         *self.session.lock().await = Some(nova);
         resumo
     }
@@ -72,7 +83,10 @@ impl KdenliveMcpServer {
             .with_session_mut(|session| session.save(caminho.as_deref()))
             .await;
         match resultado {
-            Ok(caminho_salvo) => json!({ "ok": true, "caminho": caminho_salvo.display().to_string() }),
+            Ok(caminho_salvo) => {
+                self.pedir_recarga(&caminho_salvo);
+                json!({ "ok": true, "caminho": caminho_salvo.display().to_string() })
+            }
             Err(valor_erro) => valor_erro,
         }
     }
@@ -151,6 +165,14 @@ fn validar_documento(doc: &xmltree::Element) -> Value {
         if vazio {
             problemas.push(format!("trilha \"{track_id}\" está vazia"));
         }
+    }
+
+    if document::track_ids(doc).is_empty() {
+        problemas.push(
+            "o projeto não tem nenhuma trilha: o Kdenlive 26 fecha ao abrir um projeto assim; \
+             adicione ao menos uma trilha com timeline_add_track antes de salvar"
+                .to_string(),
+        );
     }
 
     json!(problemas)
