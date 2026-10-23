@@ -491,6 +491,32 @@ pub struct ClipSetTransformParams {
     pub rotation: Option<f64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClipReframeVerticalParams {
+    /// Referência do clipe na timeline, `"<track_id>:<índice>"`.
+    pub clip_ref: String,
+    /// `"fill"` (padrão): preenche o quadro e corta o que sobra, sem faixas
+    /// pretas. `"fit"`: o vídeo inteiro aparece, com faixas nas sobras.
+    #[serde(default = "modo_preencher")]
+    pub mode: String,
+    /// Em `fill`, qual parte do vídeo fica visível na horizontal: 0 = borda
+    /// esquerda, 0.5 = centro (padrão), 1 = borda direita.
+    #[serde(default = "meio")]
+    pub focus_x: f64,
+    /// O mesmo na vertical (importa quando o vídeo é mais alto que o quadro):
+    /// 0 = topo, 0.5 = centro (padrão), 1 = base.
+    #[serde(default = "meio")]
+    pub focus_y: f64,
+}
+
+fn modo_preencher() -> String {
+    "fill".to_string()
+}
+
+fn meio() -> f64 {
+    0.5
+}
+
 // -- Miniatura --------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]

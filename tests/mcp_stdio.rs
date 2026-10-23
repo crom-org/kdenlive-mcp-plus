@@ -102,6 +102,7 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "bin_rename",
             "clip_add_note",
             "clip_get_properties",
+            "clip_reframe_vertical",
             "clip_reverse",
             "clip_set_color",
             "clip_set_opacity",
@@ -1592,4 +1593,167 @@ async fn project_new_cria_trilhas_padrao_e_validate_avisa_projeto_sem_trilhas() 
     );
 
     client.cancel().await.expect("fechamento limpo do cliente");
+}
+
+/// Cor (r, g, b) do pixel `(x, y)` de uma imagem, lida com o `ffmpeg`.
+fn pixel(imagem: &std::path::Path, x: u32, y: u32) -> (u8, u8, u8) {
+    let saida = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(imagem)
+        .args(["-vf", &format!("crop=1:1:{x}:{y}"), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .expect("ffmpeg executa");
+    assert!(saida.status.success(), "ffmpeg falhou: {}", String::from_utf8_lossy(&saida.stderr));
+    assert_eq!(saida.stdout.len(), 3, "esperava 1 pixel RGB");
+    (saida.stdout[0], saida.stdout[1], saida.stdout[2])
+}
+
+fn e_azul(c: (u8, u8, u8)) -> bool {
+    c.2 > 150 && c.0 < 100 && c.1 < 100
+}
+
+fn e_vermelho(c: (u8, u8, u8)) -> bool {
+    c.0 > 150 && c.1 < 100 && c.2 < 100
+}
+
+fn e_preto(c: (u8, u8, u8)) -> bool {
+    c.0 < 40 && c.1 < 40 && c.2 < 40
+}
+
+/// `clip_reframe_vertical` de verdade: um vídeo 16:9 com a metade esquerda
+/// azul e a direita vermelha vira um quadro 9:16, e o resultado é conferido
+/// **no pixel** do quadro renderizado (centro, foco à esquerda/direita, fit).
+#[tokio::test]
+async fn clip_reframe_vertical_reenquadra_de_verdade_e_confere_os_pixels() {
+    let ferramentas_ok = ["ffmpeg", "ffprobe"].iter().all(|p| {
+        std::process::Command::new(p).arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
+    });
+    if !ferramentas_ok {
+        eprintln!("ffmpeg/ffprobe não encontrados: teste ignorado");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_reframe_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+    let video = dir.join("azul_vermelho.mp4");
+    let feito = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg("color=c=red:s=640x360:d=2:r=25,drawbox=x=0:y=0:w=320:h=360:color=blue:t=fill")
+        .args(["-pix_fmt", "yuv420p"])
+        .arg(&video)
+        .status()
+        .expect("ffmpeg executa");
+    assert!(feito.success(), "não consegui gerar o vídeo de teste");
+
+    let client = iniciar_cliente().await;
+    assert_ok(
+        &chamar(&client, "project_new", serde_json::json!({ "profile": "vertical_hd_30" })).await,
+        "project_new vertical",
+    );
+    let importado = chamar(
+        &client,
+        "bin_import_clip",
+        serde_json::json!({ "path": video.to_string_lossy(), "name": "azul e vermelho" }),
+    )
+    .await;
+    assert_ok(&importado, "bin_import_clip");
+    let clip_id = importado["clip_id"].as_str().expect("clip_id").to_string();
+    let colocado = chamar(
+        &client,
+        "timeline_add_clip",
+        serde_json::json!({ "track_id": "track0", "producer_id": clip_id, "in_frame": 0, "out_frame": 24, "position": 0 }),
+    )
+    .await;
+    assert_ok(&colocado, "timeline_add_clip");
+
+    let quadro = |nome: &str| dir.join(nome);
+    let renderizar = |nome: &'static str| {
+        let client = &client;
+        let alvo = quadro(nome);
+        async move {
+            let _ = std::fs::remove_file(&alvo);
+            let r = chamar(
+                client,
+                "preview_frame",
+                serde_json::json!({ "frame": 5, "output_path": alvo.to_string_lossy(), "overwrite": true }),
+            )
+            .await;
+            assert_ok(&r, "preview_frame");
+            alvo
+        }
+    };
+
+    // fill, centralizado: o corte passa bem no meio da emenda azul/vermelho
+    let r = chamar(
+        &client,
+        "clip_reframe_vertical",
+        serde_json::json!({ "clip_ref": "track0:0" }),
+    )
+    .await;
+    assert_ok(&r, "clip_reframe_vertical fill");
+    assert_eq!(r["source_size"]["width"], Value::from(640.0));
+    assert_eq!(r["frame_size"]["height"], Value::from(1920.0));
+    assert_eq!(r["rect"]["height"], Value::from(1920.0));
+    assert_eq!(r["rect"]["x"], Value::from(-1166.67));
+    let centro = renderizar("centro.png").await;
+    assert!(e_azul(pixel(&centro, 100, 960)), "à esquerda do centro deveria ser azul: {:?}", pixel(&centro, 100, 960));
+    assert!(e_vermelho(pixel(&centro, 980, 960)), "à direita do centro deveria ser vermelho: {:?}", pixel(&centro, 980, 960));
+    // sem faixas pretas: nem em cima nem embaixo
+    assert!(!e_preto(pixel(&centro, 100, 5)) && !e_preto(pixel(&centro, 980, 1915)));
+
+    // fill com o foco na borda esquerda: só a parte azul fica visível
+    assert_ok(
+        &chamar(&client, "clip_reframe_vertical", serde_json::json!({ "clip_ref": "track0:0", "focus_x": 0.0 })).await,
+        "clip_reframe_vertical foco 0",
+    );
+    let esquerda = renderizar("esquerda.png").await;
+    assert!(e_azul(pixel(&esquerda, 100, 960)) && e_azul(pixel(&esquerda, 980, 960)));
+
+    // foco na borda direita: só vermelho
+    assert_ok(
+        &chamar(&client, "clip_reframe_vertical", serde_json::json!({ "clip_ref": "track0:0", "focus_x": 1.0 })).await,
+        "clip_reframe_vertical foco 1",
+    );
+    let direita = renderizar("direita.png").await;
+    assert!(e_vermelho(pixel(&direita, 100, 960)) && e_vermelho(pixel(&direita, 980, 960)));
+
+    // fit: o vídeo inteiro (azul | vermelho) no meio, faixas pretas em cima e embaixo
+    let fit = chamar(
+        &client,
+        "clip_reframe_vertical",
+        serde_json::json!({ "clip_ref": "track0:0", "mode": "fit" }),
+    )
+    .await;
+    assert_ok(&fit, "clip_reframe_vertical fit");
+    assert_eq!(fit["rect"]["width"], Value::from(1080.0));
+    let caixa = renderizar("fit.png").await;
+    assert!(e_preto(pixel(&caixa, 540, 100)) && e_preto(pixel(&caixa, 540, 1800)), "faixas pretas em cima e embaixo");
+    assert!(e_azul(pixel(&caixa, 270, 960)) && e_vermelho(pixel(&caixa, 810, 960)));
+
+    // reenquadrar de novo atualiza o mesmo filtro, não empilha outro
+    let info = chamar(&client, "clip_get_properties", serde_json::json!({ "clip_ref": "track0:0" })).await;
+    let qtblends = info["filtros"].as_array().expect("filtros").iter().filter(|f| f["service"] == "qtblend").count();
+    assert_eq!(qtblends, 1, "deveria haver um único qtblend: {info}");
+
+    // erros: modo inválido, clipe inexistente, projeto que não é vertical
+    let ruim = chamar(
+        &client,
+        "clip_reframe_vertical",
+        serde_json::json!({ "clip_ref": "track0:0", "mode": "esticar" }),
+    )
+    .await;
+    assert_eq!(ruim["ok"], Value::Bool(false));
+    let inexistente =
+        chamar(&client, "clip_reframe_vertical", serde_json::json!({ "clip_ref": "track0:9" })).await;
+    assert_eq!(inexistente["ok"], Value::Bool(false));
+    assert_ok(
+        &chamar(&client, "project_set_profile", serde_json::json!({ "profile": "atsc_1080p_25" })).await,
+        "project_set_profile",
+    );
+    let horizontal =
+        chamar(&client, "clip_reframe_vertical", serde_json::json!({ "clip_ref": "track0:0" })).await;
+    assert_eq!(horizontal["ok"], Value::Bool(false));
+    assert!(horizontal["erro"].as_str().unwrap_or("").contains("vertical"), "{horizontal}");
+
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
 }

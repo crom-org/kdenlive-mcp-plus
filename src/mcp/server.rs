@@ -1054,11 +1054,28 @@ impl KdenliveMcpServer {
     // -- Transformação (Fase 2) --------------------------------------------------
 
     #[tool(
+        description = "Reframe a timeline video or image clip to the project frame, which must be \
+         vertical (e.g. 16:9 footage in a 9:16 project: set the profile first with \
+         project_set_profile \"vertical_hd_30\"). The tool measures the source file with ffprobe, \
+         computes the rectangle and applies it with the libmlt \"qtblend\" filter (the same one as \
+         clip_set_transform). Parameters: clip_ref (required); mode (optional): \"fill\" (default, \
+         fills the frame and crops the excess, no black bars) or \"fit\" (whole video visible, \
+         bars at the sides/top); focus_x and focus_y (optional, 0..1, default 0.5 = centered): \
+         which part of the video stays visible when cropping (0 = left/top edge, 1 = right/bottom \
+         edge). Returns the source size, the frame size and the rectangle applied."
+    )]
+    pub async fn clip_reframe_vertical(
+        &self,
+        Parameters(params): Parameters<ClipReframeVerticalParams>,
+    ) -> Json<Value> {
+        Json(self.clip_reframe_vertical_impl(params).await)
+    }
+
+    #[tool(
         description = "Define position, scale and rotation of a timeline clip, via the standard \
          libmlt \"qtblend\" filter (rect + rotation parameters), attached to this specific clip. \
          This tool only passes your exact values through to qtblend; it does not compute any \
-         geometry on your behalf (see clip_reframe_vertical, listed as planned/not implemented \
-         in this project's own tool catalog, for why). Parameters: clip_ref, x, y, width, height \
+         geometry on your behalf (see clip_reframe_vertical to fit a clip to the frame). Parameters: clip_ref, x, y, width, height \
          (all required, in pixels — the destination rectangle qtblend draws the source into), \
          rotation (optional, degrees)."
     )]

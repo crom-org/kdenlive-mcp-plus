@@ -53,3 +53,25 @@ pub enum EngineError {
     )]
     Signal(i32),
 }
+
+/// Encerra o processo **sem** rodar os destrutores nem os `atexit`.
+///
+/// Só para os subprocessos de render (`render` e `frame`), depois que o
+/// arquivo de saída já foi gravado e o consumidor fechado. Motivo: o
+/// `mlt_factory_init` registra um `atexit` (`mlt_factory_close`) que
+/// descarrega os módulos do MLT; se uma thread de render ainda estiver
+/// dentro de um deles (visto com o módulo Qt, em projetos de 1080x1920,
+/// confirmado com o gdb: `exit` → `mlt_factory_close` → `dlclose` enquanto
+/// outra thread estava em `QPainter`), o processo morre com SIGSEGV **depois**
+/// de ter feito o trabalho — e o servidor, vendo um sinal, devolvia "o motor
+/// travou" para um render que tinha dado certo. O sistema operacional libera
+/// a memória e as threads do processo.
+pub fn encerrar_sem_limpeza(codigo: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: `_exit` não retorna e não lê nenhuma memória do programa; os
+    // buffers de saída já foram descarregados acima. Nada além do próprio
+    // processo é afetado.
+    unsafe { libc::_exit(codigo) }
+}

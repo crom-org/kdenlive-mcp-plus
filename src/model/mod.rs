@@ -9,6 +9,7 @@
 
 pub mod document;
 pub mod profile;
+pub mod reframe;
 pub mod session;
 pub mod srt;
 

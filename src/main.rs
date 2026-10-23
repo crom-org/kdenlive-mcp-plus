@@ -17,13 +17,20 @@ const USO: &str = "uso: kdenlive-mcp-plus <mcp|render|frame|--version>\n\
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    match executar(&args) {
-        Ok(()) => ExitCode::SUCCESS,
+    let codigo: u8 = match executar(&args) {
+        Ok(()) => 0,
         Err(mensagem) => {
             eprintln!("erro: {mensagem}");
-            ExitCode::FAILURE
+            1
         }
+    };
+    // `render` e `frame` são subprocessos de uma tarefa só: depois de gravar o
+    // arquivo, saem sem a limpeza do `atexit` do libmlt, que derruba o
+    // processo se uma thread de render ainda estiver no módulo Qt.
+    if matches!(args.get(1).map(String::as_str), Some("render" | "frame")) {
+        kdenlive_mcp_plus::engine::encerrar_sem_limpeza(i32::from(codigo));
     }
+    ExitCode::from(codigo)
 }
 
 fn executar(args: &[String]) -> Result<(), String> {

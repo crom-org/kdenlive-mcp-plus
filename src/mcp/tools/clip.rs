@@ -6,10 +6,12 @@
 
 use serde_json::{Value, json};
 
+use crate::mcp::ffprobe::probe_video_size;
 use crate::mcp::params::{
-    AudioNormalizeParams, AudioSetLevelsParams, ClipRefParams, ClipSetOpacityParams, ClipSetSpeedParams,
-    ClipSetTransformParams,
+    AudioNormalizeParams, AudioSetLevelsParams, ClipRefParams, ClipReframeVerticalParams, ClipSetOpacityParams,
+    ClipSetSpeedParams, ClipSetTransformParams,
 };
+use crate::model::reframe;
 use crate::mcp::server::{KdenliveMcpServer, erro, parse_clip_ref};
 use crate::model::document;
 
@@ -190,6 +192,93 @@ impl KdenliveMcpServer {
             .await;
         match resultado {
             Ok(filter_id) => json!({ "ok": true, "clip_ref": params.clip_ref, "filter_id": filter_id }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    /// Reenquadra um clipe de vídeo/imagem para o quadro do projeto (que
+    /// precisa ser vertical): mede o vídeo com o `ffprobe`, calcula o
+    /// retângulo (`model::reframe`) e o aplica pelo mesmo filtro `qtblend`
+    /// de `clip_set_transform`.
+    pub(crate) async fn clip_reframe_vertical_impl(&self, params: ClipReframeVerticalParams) -> Value {
+        let (track_id, indice) = match parse_clip_ref(&params.clip_ref) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let modo = match params.mode.parse::<reframe::Modo>() {
+            Ok(m) => m,
+            Err(e) => return erro(e),
+        };
+
+        // 1) o que o documento diz: o arquivo de mídia do clipe e o quadro do projeto
+        let leitura = self
+            .with_session(|session| {
+                let entry = document::get_clip(&session.doc, &track_id, indice)?;
+                let producer = document::find_producer(&session.doc, entry.attributes.get("producer")?)?;
+                // um clipe com velocidade alterada fica dentro de um `timewarp`:
+                // a mídia de verdade está guardada à parte
+                let recurso = document::get_property(producer, "kdenlive-mcp-plus:original_resource")
+                    .or_else(|| document::get_property(producer, "resource"))?;
+                let perfil = document::profile_element(&session.doc)?;
+                let medida = |n: &str| perfil.attributes.get(n).and_then(|v| v.parse::<f64>().ok());
+                Some((recurso, (medida("width")?, medida("height")?)))
+            })
+            .await;
+        let (recurso, quadro) = match leitura {
+            Ok(Some(v)) => v,
+            Ok(None) => return erro(format!("clipe não encontrado: {}", params.clip_ref)),
+            Err(valor_erro) => return valor_erro,
+        };
+        if quadro.1 <= quadro.0 {
+            return erro(format!(
+                "o quadro do projeto é {}x{}, que não é vertical; troque o perfil com project_set_profile \
+                 (ex. \"vertical_hd_30\") antes de reenquadrar",
+                quadro.0, quadro.1
+            ));
+        }
+
+        // 2) o tamanho do vídeo (fora do lock: é um subprocesso)
+        let origem = match probe_video_size(std::path::Path::new(&recurso)).await {
+            Ok(v) => v,
+            Err(e) => return erro(e),
+        };
+        let retangulo = match reframe::calcular(origem, quadro, modo, params.focus_x, params.focus_y) {
+            Ok(r) => r,
+            Err(e) => return erro(e),
+        };
+
+        // 3) aplica pelo `qtblend`
+        let descricao = format!("reenquadrar o clipe {} para o quadro do projeto", params.clip_ref);
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                let filter_id = document::set_clip_transform(
+                    &mut session.doc,
+                    &track_id,
+                    indice,
+                    retangulo.x,
+                    retangulo.y,
+                    retangulo.largura,
+                    retangulo.altura,
+                    None,
+                )?;
+                session.mark_modified();
+                Ok(filter_id)
+            })
+            .await;
+        match resultado {
+            Ok(filter_id) => json!({
+                "ok": true,
+                "clip_ref": params.clip_ref,
+                "filter_id": filter_id,
+                "mode": params.mode,
+                "source_size": { "width": origem.0, "height": origem.1 },
+                "frame_size": { "width": quadro.0, "height": quadro.1 },
+                "rect": {
+                    "x": retangulo.x, "y": retangulo.y,
+                    "width": retangulo.largura, "height": retangulo.altura,
+                },
+            }),
             Err(valor_erro) => valor_erro,
         }
     }
