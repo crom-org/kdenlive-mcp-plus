@@ -224,8 +224,29 @@ impl KdenliveMcpServer {
             });
         }
         let mut prontos: Vec<(i64, PathBuf)> = Vec::new();
+        let mut falhas: Vec<(i64, String)> = Vec::new();
         while let Some(resultado) = tarefas.join_next().await {
-            prontos.push(resultado.map_err(|e| format!("tarefa de render interrompida: {e}"))??);
+            match resultado.map_err(|e| format!("tarefa de render interrompida: {e}"))? {
+                Ok(par) => prontos.push(par),
+                Err(mensagem) => {
+                    // "quadro N: ..." — guarda o número para tentar de novo
+                    let numero = mensagem.strip_prefix("quadro ").and_then(|r| r.split(':').next()).and_then(|n| n.trim().parse::<i64>().ok());
+                    match numero {
+                        Some(n) => falhas.push((n, mensagem)),
+                        None => return Err(mensagem),
+                    }
+                }
+            }
+        }
+        // Com vários processos de render ao mesmo tempo, um projeto pesado pode
+        // estourar a memória e derrubar um deles. Os quadros que falharam são
+        // refeitos um por vez; só um erro persistente vira erro da ferramenta.
+        for (quadro, primeira_falha) in falhas {
+            let alvo = pasta.join(format!("frame_{quadro:06}.png"));
+            match worker::render_frame_isolated(projeto, &alvo, quadro, true).await {
+                Ok(()) => prontos.push((quadro, alvo)),
+                Err(e) => return Err(format!("{primeira_falha} (e de novo, sozinho: {e})")),
+            }
         }
         // a ordem de término varia; devolve na ordem em que o agente pediu
         prontos.sort_by_key(|(q, _)| quadros.iter().position(|x| x == q).unwrap_or(usize::MAX));

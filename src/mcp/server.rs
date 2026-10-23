@@ -1130,7 +1130,11 @@ impl KdenliveMcpServer {
          This tool only passes your exact values through to qtblend; it does not compute any \
          geometry on your behalf (see clip_reframe_vertical to fit a clip to the frame). Parameters: clip_ref, x, y, width, height \
          (all required, in pixels — the destination rectangle qtblend draws the source into), \
-         rotation (optional, degrees)."
+         rotation (optional, degrees). Note: by default the filter keeps the source aspect ratio \
+         inside the rectangle, so a rectangle that is not 16:9 is letterboxed; to stretch the \
+         clip to exactly the rectangle (e.g. to draw bars or boxes from a solid title), call \
+         filter_set_param on the returned filter_id with param \"distort\" and value \"1\", and \
+         set \"rotate_center\" to \"1\" to rotate around the center instead of the corner."
     )]
     pub async fn clip_set_transform(
         &self,
