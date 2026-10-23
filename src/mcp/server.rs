@@ -1054,6 +1054,40 @@ impl KdenliveMcpServer {
     // -- Transformação (Fase 2) --------------------------------------------------
 
     #[tool(
+        description = "Look at several frames of the project at once, to analyse what was built \
+         without opening Kdenlive or rendering the whole video. Renders each chosen frame as a PNG \
+         (3 engine processes in parallel) and, by default, also assembles ONE contact-sheet image \
+         with all of them in a grid, each labelled with its frame number and time (needs ffmpeg). \
+         Parameters: frames (list of frame numbers, 0-based) OR start/end/step (an interval; with \
+         nothing given, about 12 frames spread over the whole project); project_path (optional, \
+         default the open project); output_dir (optional; default a temporary folder); \
+         contact_sheet (optional, default true); columns (optional, 1..8, default 3); thumb_width \
+         (optional, default 480). At most 60 frames per call. Returns the contact-sheet path, the \
+         grid description (row by row), and for each frame its number, time in seconds and PNG \
+         path. Animated filters (keyframes) are evaluated at the real frame position. Use \
+         preview_gif for motion and export_render with start_frame/end_frame to render only a \
+         part as video."
+    )]
+    pub async fn preview_frames(&self, Parameters(params): Parameters<PreviewFramesParams>) -> Json<Value> {
+        Json(self.preview_frames_impl(params).await)
+    }
+
+    #[tool(
+        description = "Make an animated GIF of a part of the project, to check motion (fades, \
+         slides, keyframed effects) without rendering a video. Renders the needed frames as PNGs \
+         (3 engine processes in parallel) and assembles the GIF with ffmpeg. Parameters: \
+         start/end (frame interval, inclusive; default the whole project); step (take one frame \
+         every N project frames; default 1, or more when the interval has over 150 frames); fps \
+         (optional; default the natural speed of the project); width (optional, default 480); \
+         output_path (optional .gif; default a temporary folder); overwrite (optional); \
+         project_path (optional, default the open project). At most 150 frames. Returns the GIF \
+         path, size, the frames used and its duration."
+    )]
+    pub async fn preview_gif(&self, Parameters(params): Parameters<PreviewGifParams>) -> Json<Value> {
+        Json(self.preview_gif_impl(params).await)
+    }
+
+    #[tool(
         description = "Audio ducking: lower a clip (or every clip of a track), typically background \
          music, while another track (typically the voice-over) is speaking. Works with keyframes on \
          the level of a dedicated libmlt \"volume\" filter (no audio plugins needed); calling it \

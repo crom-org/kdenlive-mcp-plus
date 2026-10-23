@@ -127,6 +127,7 @@ impl JobRegistry {
                 .arg(&output_buf)
                 .arg("--preset")
                 .arg(&preset)
+                .envs(crate::engine::ambiente_sem_tela())
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())

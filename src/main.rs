@@ -67,10 +67,21 @@ fn executar_render(args: &[String]) -> Result<(), String> {
     let mut saida: Option<PathBuf> = None;
     let mut preset = kdenlive_mcp_plus::engine::preset::DEFAULT_PRESET.to_string();
     let mut overwrite = false;
+    let mut de: Option<i64> = None;
+    let mut ate: Option<i64> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--from" | "--to" => {
+                let nome = args[i].clone();
+                i += 1;
+                let valor = args
+                    .get(i)
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .ok_or_else(|| format!("{nome} precisa de um número inteiro (quadro).\n\n{uso_render}"))?;
+                if nome == "--from" { de = Some(valor) } else { ate = Some(valor) }
+            }
             "--preset" => {
                 i += 1;
                 let valor = args
@@ -92,7 +103,13 @@ fn executar_render(args: &[String]) -> Result<(), String> {
     let opts = kdenlive_mcp_plus::engine::preset::resolve_preset(&preset, overwrite)
         .map_err(|erro| erro.to_string())?;
 
-    kdenlive_mcp_plus::engine::render::render(&projeto, &saida, &opts).map_err(|erro| erro.to_string())
+    let intervalo = match (de, ate) {
+        (Some(a), Some(b)) => Some((a, b)),
+        (None, None) => None,
+        _ => return Err(format!("--from e --to andam juntos.\n\n{uso_render}")),
+    };
+    kdenlive_mcp_plus::engine::render::render_range(&projeto, &saida, &opts, intervalo)
+        .map_err(|erro| erro.to_string())
 }
 
 fn executar_frame(args: &[String]) -> Result<(), String> {

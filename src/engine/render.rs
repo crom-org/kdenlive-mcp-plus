@@ -48,6 +48,26 @@ fn path_to_cstring(path: &Path, contexto: &str) -> Result<CString, EngineError> 
 /// já resolvidas de um preset. Não sobrescreve `output` existente a menos que
 /// `opts.overwrite` seja verdadeiro.
 pub fn render(project: &Path, output: &Path, opts: &RenderOptions) -> Result<(), EngineError> {
+    render_range(project, output, opts, None)
+}
+
+/// Como [`render`], mas só o trecho `intervalo` = `(primeiro, último)` quadros
+/// (inclusive, 0-based), se dado. A posição dos quadros do trecho é a do
+/// projeto inteiro (as animações continuam certas), como num corte de
+/// `mlt_producer_cut`. Serve para conferir só uma parte sem renderizar tudo.
+pub fn render_range(
+    project: &Path,
+    output: &Path,
+    opts: &RenderOptions,
+    intervalo: Option<(i64, i64)>,
+) -> Result<(), EngineError> {
+    if let Some((inicio, fim)) = intervalo
+        && (inicio < 0 || fim < inicio)
+    {
+        return Err(EngineError::InvalidText(format!(
+            "intervalo inválido: de {inicio} a {fim} (o início não pode ser negativo nem maior que o fim)"
+        )));
+    }
     if !project.exists() {
         return Err(EngineError::ProjectNotFound(project.to_path_buf()));
     }
@@ -69,7 +89,7 @@ pub fn render(project: &Path, output: &Path, opts: &RenderOptions) -> Result<(),
         return Err(EngineError::Create("perfil de vídeo (profile)"));
     }
 
-    let resultado = render_com_perfil(profile, &project_c, &output_c, opts, None);
+    let resultado = render_com_perfil(profile, &project_c, &output_c, opts, intervalo);
 
     // SAFETY: `profile` não é nulo (checado acima) e não é mais usado depois
     // deste ponto, em nenhum dos caminhos de `render_com_perfil`.
@@ -126,7 +146,7 @@ pub fn render_frame(project: &Path, output: &Path, frame: i64, overwrite: bool) 
         return Err(EngineError::Create("perfil de vídeo (profile)"));
     }
 
-    let resultado = render_com_perfil(profile, &project_c, &output_c, &opts, Some(frame));
+    let resultado = render_com_perfil(profile, &project_c, &output_c, &opts, Some((frame, frame)));
 
     // SAFETY: ver a função `render`, acima — mesma garantia.
     unsafe {
@@ -148,7 +168,7 @@ fn render_com_perfil(
     project_c: &CString,
     output_c: &CString,
     opts: &RenderOptions,
-    only_frame: Option<i64>,
+    intervalo: Option<(i64, i64)>,
 ) -> Result<(), EngineError> {
     // SAFETY: `profile` é válido (verificado pelo chamador). "xml" é o nome
     // do serviço de produtor registrado pelo libmlt para ler projetos MLT.
@@ -162,21 +182,29 @@ fn render_com_perfil(
         ));
     }
 
-    if let Some(frame) = only_frame {
-        // SAFETY: `producer` não é nulo (checado acima); `frame` já foi
-        // validado como não-negativo pelo chamador (`render_frame`).
-        // `mlt_position` é `int32_t` nesta build do libmlt (ver
-        // mlt_types.h); o `as i32` é uma conversão estreita, não uma
-        // reinterpretação de bits.
-        let rc = unsafe { ffi::mlt_producer_set_in_and_out(producer, frame as i32, frame as i32) };
-        if rc != 0 {
+    // Um quadro só (ou um trecho), **sem** `mlt_producer_set_in_and_out`:
+    // reduzir o intervalo do produtor faz o libmlt contar a posição a partir do
+    // novo início, então um filtro animado (keyframes) era avaliado sempre no
+    // quadro 0 — o `preview_frame` de um clipe com animação saía no estado do
+    // primeiro keyframe (preto, se ele começasse em opacidade 0). Um *corte*
+    // (`mlt_producer_cut`) mantém a posição absoluta do produtor original,
+    // como as listas de reprodução fazem com os clipes.
+    let mut corte: ffi::mlt_producer = std::ptr::null_mut();
+    if let Some((inicio, fim)) = intervalo {
+        // SAFETY: `producer` não é nulo (checado acima); `inicio` e `fim` já
+        // foram validados (não negativos, `inicio <= fim`) pelos chamadores.
+        // `mlt_position` é `int32_t` nesta build do libmlt (ver mlt_types.h);
+        // o `as i32` é uma conversão estreita, não uma reinterpretação de bits.
+        corte = unsafe { ffi::mlt_producer_cut(producer, inicio as i32, fim as i32) };
+        if corte.is_null() {
             // SAFETY: `producer` não é nulo neste ponto.
             unsafe { ffi::mlt_producer_close(producer) };
             return Err(EngineError::InvalidText(format!(
-                "não consegui selecionar o quadro {frame} (fora do intervalo do projeto?)"
+                "não consegui selecionar os quadros {inicio} a {fim} (fora do intervalo do projeto?)"
             )));
         }
     }
+    let fonte = if corte.is_null() { producer } else { corte };
 
     // SAFETY: `profile` é válido. "avformat" é o nome do serviço de
     // consumidor do libmlt que usa o FFmpeg para gravar o arquivo de saída.
@@ -191,23 +219,22 @@ fn render_com_perfil(
     }
 
     if let Err(erro) = configurar_consumer(consumer, opts) {
-        fechar_tudo(consumer, producer);
+        fechar_tudo(consumer, producer, corte);
         return Err(erro);
     }
-
     // SAFETY: `producer` e `consumer` são válidos (verificados acima).
-    let service = unsafe { ffi::mlt_producer_service(producer) };
+    let service = unsafe { ffi::mlt_producer_service(fonte) };
     // SAFETY: `consumer` e `service` são válidos.
     let conectado = unsafe { ffi::mlt_consumer_connect(consumer, service) };
     if conectado != 0 {
-        fechar_tudo(consumer, producer);
+        fechar_tudo(consumer, producer, corte);
         return Err(EngineError::Connect);
     }
 
     // SAFETY: `consumer` é válido.
     let iniciado = unsafe { ffi::mlt_consumer_start(consumer) };
     if iniciado != 0 {
-        fechar_tudo(consumer, producer);
+        fechar_tudo(consumer, producer, corte);
         return Err(EngineError::Start);
     }
 
@@ -220,16 +247,19 @@ fn render_com_perfil(
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    fechar_tudo(consumer, producer);
+    fechar_tudo(consumer, producer, corte);
     Ok(())
 }
 
-fn fechar_tudo(consumer: ffi::mlt_consumer, producer: ffi::mlt_producer) {
+fn fechar_tudo(consumer: ffi::mlt_consumer, producer: ffi::mlt_producer, corte: ffi::mlt_producer) {
     // SAFETY: ambos os ponteiros vêm de chamadas bem-sucedidas a
     // mlt_factory_consumer/mlt_factory_producer e não são usados depois
     // deste close, em nenhum caminho de chamada desta função.
     unsafe {
         ffi::mlt_consumer_close(consumer);
+        if !corte.is_null() {
+            ffi::mlt_producer_close(corte);
+        }
         ffi::mlt_producer_close(producer);
     }
 }

@@ -84,6 +84,16 @@ impl KdenliveMcpServer {
             }
         }
 
+        let intervalo = match (params.start_frame, params.end_frame) {
+            (Some(a), Some(b)) if a >= 0 && b >= a => Some((a, b)),
+            (Some(_), Some(_)) => return erro("intervalo inválido: start_frame não pode ser negativo nem maior que end_frame"),
+            (None, None) => None,
+            _ => return erro("informe start_frame e end_frame juntos (ou nenhum dos dois, para renderizar tudo)"),
+        };
+        if intervalo.is_some() && !params.wait {
+            return erro("renderizar só um trecho (start_frame/end_frame) funciona apenas com wait=true");
+        }
+
         let project_path = match self
             .resolve_project_path_for_render(params.project_path.as_deref())
             .await
@@ -104,7 +114,7 @@ impl KdenliveMcpServer {
         if params.wait {
             let _guard = self.render_lock.lock().await;
             if let Err(e) =
-                worker::render_isolated(&project_path, &output_path, &params.preset, params.overwrite)
+                worker::render_range_isolated(&project_path, &output_path, &params.preset, params.overwrite, intervalo)
                     .await
             {
                 return erro(e.to_string());

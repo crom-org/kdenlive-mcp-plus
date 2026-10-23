@@ -3,6 +3,7 @@
 //! arquivo aqui cobre uma categoria; as assinaturas `#[tool]` ficam em
 //! `server.rs`, que só delega para estes métodos.
 
+mod analise;
 mod bin;
 mod clip;
 mod export;

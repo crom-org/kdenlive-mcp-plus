@@ -75,3 +75,48 @@ pub fn encerrar_sem_limpeza(codigo: i32) -> ! {
     // processo é afetado.
     unsafe { libc::_exit(codigo) }
 }
+
+/// Variáveis de ambiente que um subprocesso de render precisa para o módulo
+/// Qt do libmlt (títulos `kdenlivetitle`, o filtro/transição `qtblend`) funcionar
+/// **sem tela**. O libmlt recusa o módulo se não houver `DISPLAY` nem
+/// `WAYLAND_DISPLAY` — e os títulos saem como o texto "INVALID" — mas basta
+/// o `DISPLAY` existir: com `QT_QPA_PLATFORM=offscreen` o Qt ignora o valor e
+/// desenha na memória. Um cliente MCP como o Claude Desktop inicia o servidor
+/// sem `DISPLAY` (só com `HOME`, `PATH`, `USER`, `LOGNAME` e `SHELL`), então
+/// sem isto o render de qualquer projeto com título ou composição sairia errado.
+/// Com uma tela de verdade (`DISPLAY`/`WAYLAND_DISPLAY`), não muda nada.
+pub fn ambiente_sem_tela() -> Vec<(&'static str, &'static str)> {
+    ambiente_sem_tela_para(
+        std::env::var_os("DISPLAY").is_some(),
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        std::env::var_os("QT_QPA_PLATFORM").is_some(),
+    )
+}
+
+fn ambiente_sem_tela_para(tem_display: bool, tem_wayland: bool, tem_plataforma_qt: bool) -> Vec<(&'static str, &'static str)> {
+    if tem_display || tem_wayland {
+        return Vec::new();
+    }
+    let mut variaveis = vec![("DISPLAY", ":99")];
+    if !tem_plataforma_qt {
+        variaveis.push(("QT_QPA_PLATFORM", "offscreen"));
+    }
+    variaveis
+}
+
+#[cfg(test)]
+mod testes_ambiente {
+    use super::ambiente_sem_tela_para;
+
+    #[test]
+    fn com_tela_nao_muda_nada_e_sem_tela_liga_o_qt_offscreen() {
+        assert!(ambiente_sem_tela_para(true, false, false).is_empty());
+        assert!(ambiente_sem_tela_para(false, true, false).is_empty());
+        assert_eq!(
+            ambiente_sem_tela_para(false, false, false),
+            vec![("DISPLAY", ":99"), ("QT_QPA_PLATFORM", "offscreen")]
+        );
+        // quem já escolheu a plataforma do Qt é respeitado
+        assert_eq!(ambiente_sem_tela_para(false, false, true), vec![("DISPLAY", ":99")]);
+    }
+}

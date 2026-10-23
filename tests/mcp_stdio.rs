@@ -130,6 +130,8 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
             "marker_list",
             "marker_remove",
             "preview_frame",
+            "preview_frames",
+            "preview_gif",
             "project_get_info",
             "project_get_profile",
             "project_import_kdenlive",
@@ -1942,6 +1944,279 @@ async fn audio_duck_abaixa_a_musica_so_enquanto_a_voz_fala_e_confere_o_audio() {
     let clipe_inexistente =
         chamar(&client, "audio_duck", serde_json::json!({ "clip_ref": "track1:9", "voice_track_id": trilha_voz })).await;
     assert_eq!(clipe_inexistente["ok"], Value::Bool(false));
+
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Como o Claude Desktop inicia o servidor: sem `DISPLAY` nem `WAYLAND_DISPLAY`.
+async fn iniciar_cliente_sem_tela() -> RunningService<rmcp::RoleClient, ()> {
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_kdenlive-mcp-plus"));
+    let mut comando = tokio::process::Command::new(exe);
+    comando
+        .arg("mcp")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("QT_QPA_PLATFORM");
+    let transporte = TokioChildProcess::new(comando).expect("deveria conseguir iniciar o processo filho");
+    ().serve(transporte).await.expect("o handshake initialize deveria funcionar")
+}
+
+/// Sem tela (como no Claude Desktop), o render de um título tem de sair com a
+/// cor do título — e não o texto "INVALID" em branco sobre preto, que é o que o
+/// módulo Qt do libmlt produz quando recusa o ambiente sem `DISPLAY`.
+#[tokio::test]
+async fn render_sem_display_desenha_o_titulo_e_nao_o_texto_invalid() {
+    let ffmpeg_ok = std::process::Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false);
+    if !ffmpeg_ok {
+        eprintln!("ffmpeg não encontrado: teste ignorado");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_sem_tela_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+    let client = iniciar_cliente_sem_tela().await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    // um painel azul-marinho que cobre o quadro inteiro
+    let titulo = chamar(
+        &client,
+        "title_add",
+        serde_json::json!({ "text": "████", "duration_frames": 30, "font_family": "DejaVu Sans Mono", "font_size": 1300, "color": "#0A1230" }),
+    )
+    .await;
+    assert_ok(&titulo, "title_add");
+    let clip_id = titulo["clip_id"].as_str().expect("clip_id").to_string();
+    assert_ok(
+        &chamar(
+            &client,
+            "timeline_add_clip",
+            serde_json::json!({ "track_id": "track0", "producer_id": clip_id, "in_frame": 0, "out_frame": 29, "position": 0 }),
+        )
+        .await,
+        "timeline_add_clip",
+    );
+    let png = dir.join("painel.png");
+    assert_ok(
+        &chamar(&client, "preview_frame", serde_json::json!({ "frame": 5, "output_path": png.to_string_lossy() })).await,
+        "preview_frame sem DISPLAY",
+    );
+    let cor = pixel(&png, 960, 540);
+    assert!(
+        cor.2 > cor.0 && cor.2 > 20 && cor.0 < 40,
+        "o canto deveria ser azul-marinho (#0A1230), e não preto/branco do INVALID: {cor:?}"
+    );
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Monta um projeto com um painel azul-marinho que **aparece** (opacidade 0 no
+/// quadro 0, 1 a partir do quadro 20) e devolve o cliente já com ele aberto.
+async fn cliente_com_painel_animado() -> RunningService<rmcp::RoleClient, ()> {
+    let client = iniciar_cliente_sem_tela().await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    let titulo = chamar(
+        &client,
+        "title_add",
+        serde_json::json!({ "text": "████", "duration_frames": 60, "font_family": "DejaVu Sans Mono", "font_size": 1300, "color": "#0A1230" }),
+    )
+    .await;
+    assert_ok(&titulo, "title_add");
+    let clip_id = titulo["clip_id"].as_str().expect("clip_id").to_string();
+    assert_ok(
+        &chamar(
+            &client,
+            "timeline_add_clip",
+            serde_json::json!({ "track_id": "track0", "producer_id": clip_id, "in_frame": 0, "out_frame": 59, "position": 0 }),
+        )
+        .await,
+        "timeline_add_clip",
+    );
+    let t = chamar(
+        &client,
+        "clip_set_transform",
+        serde_json::json!({ "clip_ref": "track0:0", "x": 0, "y": 0, "width": 1920, "height": 1080 }),
+    )
+    .await;
+    assert_ok(&t, "clip_set_transform");
+    let filtro = t["filter_id"].as_str().expect("filter_id").to_string();
+    for (quadro, valor) in [(0, "0 0 1920 1080 0"), (20, "0 0 1920 1080 1")] {
+        assert_ok(
+            &chamar(
+                &client,
+                "keyframe_set",
+                serde_json::json!({ "clip_ref": "track0:0", "filter_id": filtro, "param": "rect", "frame": quadro, "value": valor }),
+            )
+            .await,
+            "keyframe_set",
+        );
+    }
+    client
+}
+
+fn tem_ffmpeg() -> bool {
+    std::process::Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// O `preview_frame` avalia a animação no quadro **pedido**, e não sempre no
+/// quadro 0 (o que deixava um clipe que aparece com fade tudo preto), e
+/// funciona sem `DISPLAY`, como no Claude Desktop.
+#[tokio::test]
+async fn preview_frame_avalia_a_animacao_no_quadro_pedido_e_sem_display() {
+    if !tem_ffmpeg() {
+        eprintln!("ffmpeg não encontrado: teste ignorado");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_anim_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+    let client = cliente_com_painel_animado().await;
+    for (quadro, azul) in [(0, false), (40, true)] {
+        let png = dir.join(format!("q{quadro}.png"));
+        assert_ok(
+            &chamar(
+                &client,
+                "preview_frame",
+                serde_json::json!({ "frame": quadro, "output_path": png.to_string_lossy() }),
+            )
+            .await,
+            "preview_frame",
+        );
+        let cor = pixel(&png, 960, 540);
+        if azul {
+            assert!(cor.2 > cor.0 && cor.2 > 20, "no quadro {quadro} o painel já apareceu (azul-marinho): {cor:?}");
+        } else {
+            assert!(e_preto(cor), "no quadro 0 a opacidade é 0 (preto): {cor:?}");
+        }
+    }
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `preview_frames` renderiza vários quadros de uma vez, devolve um PNG por
+/// quadro (na ordem pedida) e uma folha de contato; erros de quadro e de
+/// combinação de parâmetros voltam como `ok: false`.
+#[tokio::test]
+async fn preview_frames_devolve_um_png_por_quadro_e_a_folha_de_contato() {
+    if !tem_ffmpeg() {
+        eprintln!("ffmpeg não encontrado: teste ignorado");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_frames_{}", std::process::id()));
+    let client = cliente_com_painel_animado().await;
+
+    let r = chamar(
+        &client,
+        "preview_frames",
+        serde_json::json!({ "frames": [40, 0, 20], "output_dir": dir.to_string_lossy(), "columns": 2, "thumb_width": 240 }),
+    )
+    .await;
+    assert_ok(&r, "preview_frames");
+    let frames = r["frames"].as_array().expect("frames");
+    let numeros: Vec<i64> = frames.iter().map(|f| f["frame"].as_i64().unwrap()).collect();
+    assert_eq!(numeros, vec![40, 0, 20], "na ordem pedida");
+    for f in frames {
+        assert!(std::path::Path::new(f["path"].as_str().unwrap()).exists(), "{f}");
+    }
+    assert_eq!(r["grade"]["colunas"], Value::from(2));
+    assert_eq!(r["grade"]["linhas"], Value::from(2));
+    let folha = std::path::PathBuf::from(r["contact_sheet"].as_str().expect("contact_sheet"));
+    assert!(folha.exists());
+    // a folha tem 2 colunas de 240 px e 2 linhas: maior na largura que na altura
+    let medidas = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
+        .arg(&folha)
+        .output()
+        .expect("ffprobe executa");
+    let texto = String::from_utf8_lossy(&medidas.stdout).trim().to_string();
+    let (w, h) = texto.split_once(',').expect("largura,altura");
+    assert!(w.parse::<u32>().unwrap() > 480 && h.parse::<u32>().unwrap() > 270, "folha {texto}");
+
+    // sem escolher nada: espalha quadros pelo projeto todo; sem folha se não quiser
+    let auto = chamar(
+        &client,
+        "preview_frames",
+        serde_json::json!({ "output_dir": dir.to_string_lossy(), "contact_sheet": false }),
+    )
+    .await;
+    assert_ok(&auto, "preview_frames automático");
+    assert!(auto["contact_sheet"].is_null());
+    assert!(auto["frames"].as_array().unwrap().len() >= 6);
+
+    // erros
+    let fora = chamar(&client, "preview_frames", serde_json::json!({ "frames": [9999] })).await;
+    assert_eq!(fora["ok"], Value::Bool(false));
+    let mistura = chamar(&client, "preview_frames", serde_json::json!({ "frames": [1], "start": 0 })).await;
+    assert_eq!(mistura["ok"], Value::Bool(false));
+
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `preview_gif` gera um GIF do trecho, e `export_render` com
+/// `start_frame`/`end_frame` renderiza só aquela parte (duração proporcional).
+#[tokio::test]
+async fn preview_gif_e_export_render_de_um_trecho() {
+    if !tem_ffmpeg() {
+        eprintln!("ffmpeg não encontrado: teste ignorado");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_gif_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+    let client = cliente_com_painel_animado().await;
+
+    let gif = dir.join("trecho.gif");
+    let r = chamar(
+        &client,
+        "preview_gif",
+        serde_json::json!({ "start": 0, "end": 59, "step": 5, "width": 240, "output_path": gif.to_string_lossy() }),
+    )
+    .await;
+    assert_ok(&r, "preview_gif");
+    // 0, 5, ..., 55 e mais o último quadro do intervalo (59)
+    assert_eq!(r["quadros_usados"].as_array().map(Vec::len), Some(13));
+    assert!(std::fs::metadata(&gif).expect("gif criado").len() > 500);
+    let formato = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,width", "-of", "csv=p=0"])
+        .arg(&gif)
+        .output()
+        .expect("ffprobe executa");
+    assert_eq!(String::from_utf8_lossy(&formato.stdout).trim(), "gif,240");
+    // sobrescrever exige overwrite
+    let de_novo = chamar(
+        &client,
+        "preview_gif",
+        serde_json::json!({ "start": 0, "end": 10, "output_path": gif.to_string_lossy() }),
+    )
+    .await;
+    assert_eq!(de_novo["ok"], Value::Bool(false));
+
+    // só um trecho do render: 1 segundo (quadros 10 a 34 a 25 fps) de um projeto de 60 quadros
+    let trecho = dir.join("trecho.mp4");
+    let r = chamar(
+        &client,
+        "export_render",
+        serde_json::json!({
+            "output_path": trecho.to_string_lossy(), "preset": "h264_fast",
+            "start_frame": 10, "end_frame": 34, "overwrite": true,
+        }),
+    )
+    .await;
+    assert_ok(&r, "export_render de um trecho");
+    let duracao = r["duracao_segundos"].as_f64().expect("duração medida");
+    assert!((duracao - 1.0).abs() < 0.2, "25 quadros a 25 fps = ~1 s, medi {duracao}");
+    // intervalo pela metade, ou com wait=false: erro
+    let metade = chamar(
+        &client,
+        "export_render",
+        serde_json::json!({ "output_path": dir.join("x.mp4").to_string_lossy(), "start_frame": 3 }),
+    )
+    .await;
+    assert_eq!(metade["ok"], Value::Bool(false));
+    let sem_esperar = chamar(
+        &client,
+        "export_render",
+        serde_json::json!({ "output_path": dir.join("y.mp4").to_string_lossy(), "start_frame": 0, "end_frame": 5, "wait": false }),
+    )
+    .await;
+    assert_eq!(sem_esperar["ok"], Value::Bool(false));
 
     client.cancel().await.expect("fechamento limpo do cliente");
     let _ = std::fs::remove_dir_all(&dir);

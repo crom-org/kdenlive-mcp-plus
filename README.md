@@ -1,6 +1,6 @@
 # kdenlive-mcp-plus
 
-Servidor MCP em Rust que edita vídeo de forma headless usando o libmlt — o mesmo motor de render do Kdenlive —, lendo e escrevendo o formato nativo `.kdenlive` (XML do MLT). O servidor expõe 91 ferramentas MCP — todo o catálogo de edição (projeto, bin, timeline, filtros, transições, títulos, legendas, áudio com ducking, reenquadramento vertical, fila de render e mais), descritas por completo em [docs/04-ferramentas.md](docs/04-ferramentas.md) e todas testadas.
+Servidor MCP em Rust que edita vídeo de forma headless usando o libmlt — o mesmo motor de render do Kdenlive —, lendo e escrevendo o formato nativo `.kdenlive` (XML do MLT). O servidor expõe 93 ferramentas MCP — todo o catálogo de edição (projeto, bin, timeline, filtros, transições, títulos, legendas, áudio com ducking, reenquadramento vertical, análise por quadros/folha de contato/GIF, fila de render e mais), descritas por completo em [docs/04-ferramentas.md](docs/04-ferramentas.md) e todas testadas.
 
 > **kdenlive-mcp-plus** é um nome provisório, e a licença do projeto ainda está pendente de decisão. Ver [docs/decisoes.md](docs/decisoes.md) (D-008 e D-009).
 
@@ -33,7 +33,7 @@ cargo run -- render <projeto.xml> <saida.mp4> --preset h264_hq --overwrite
 cargo run -- mcp
 ```
 
-Fala MCP via stdio (entrada/saída padrão) e expõe as 91 ferramentas descritas em [docs/04-ferramentas.md](docs/04-ferramentas.md) (projeto, bin, timeline, filtros, transições, títulos, legendas, áudio, fila de render, etc. — chame `server_info` primeiro para confirmar a versão do libmlt e a lista de presets de render).
+Fala MCP via stdio (entrada/saída padrão) e expõe as 93 ferramentas descritas em [docs/04-ferramentas.md](docs/04-ferramentas.md) (projeto, bin, timeline, filtros, transições, títulos, legendas, áudio, fila de render, etc. — chame `server_info` primeiro para confirmar a versão do libmlt e a lista de presets de render).
 
 ## Configuração no Claude Desktop
 
@@ -67,6 +67,16 @@ Cuidados:
 - Só com `KDENLIVE_MCP_AUTOSAVE=1` (sem `AUTORELOAD`) o arquivo é regravado a cada edição, mas o Kdenlive só atualiza quando você usa File ▸ Revert. Sem nenhuma das duas, peça `project_save` depois de cada etapa.
 
 Edições feitas pela interface do Kdenlive só chegam ao Claude se ele reabrir o arquivo (`project_open`); deixe o Claude montar e use o Kdenlive para conferir.
+
+## Conferindo o que foi montado (análise por quadros)
+
+Sem abrir o Kdenlive nem renderizar o vídeo inteiro, o agente pode olhar o projeto:
+
+- `preview_frame` — um quadro; `preview_frames` — vários de uma vez (por lista ou por intervalo e passo) e **uma folha de contato** com todos, cada miniatura com o número do quadro e o tempo;
+- `preview_gif` — uma animação do trecho para ver o movimento;
+- `export_render` com `start_frame`/`end_frame` — renderiza só aquela parte como vídeo (mais lento, mas é o resultado final de verdade).
+
+As animações (keyframes) são avaliadas no quadro certo, e os previews funcionam mesmo quando o servidor é iniciado sem tela (como no Claude Desktop). A folha e o GIF precisam do `ffmpeg`.
 
 ## Configuração no Claude Code
 

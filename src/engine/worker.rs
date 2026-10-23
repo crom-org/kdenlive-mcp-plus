@@ -38,6 +38,18 @@ pub async fn render_isolated(
     preset: &str,
     overwrite: bool,
 ) -> Result<(), EngineError> {
+    render_range_isolated(project, output, preset, overwrite, None).await
+}
+
+/// Como [`render_isolated`], mas só os quadros `intervalo` = `(primeiro,
+/// último)` (inclusive), se dado.
+pub async fn render_range_isolated(
+    project: &Path,
+    output: &Path,
+    preset: &str,
+    overwrite: bool,
+    intervalo: Option<(i64, i64)>,
+) -> Result<(), EngineError> {
     let exe = std::env::current_exe().map_err(|erro| {
         EngineError::InvalidText(format!("não encontrei o caminho do próprio executável: {erro}"))
     })?;
@@ -49,6 +61,7 @@ pub async fn render_isolated(
         .arg(output)
         .arg("--preset")
         .arg(preset)
+        .envs(crate::engine::ambiente_sem_tela())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -56,6 +69,9 @@ pub async fn render_isolated(
         // o `Child` é descartado; `kill_on_drop` garante que o processo filho
         // seja morto nesse momento em vez de ficar órfão.
         .kill_on_drop(true);
+    if let Some((inicio, fim)) = intervalo {
+        comando.arg("--from").arg(inicio.to_string()).arg("--to").arg(fim.to_string());
+    }
     if overwrite {
         comando.arg("--overwrite");
     }
@@ -93,6 +109,7 @@ pub async fn render_frame_isolated(
         .arg(project)
         .arg(output)
         .arg(frame.to_string())
+        .envs(crate::engine::ambiente_sem_tela())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

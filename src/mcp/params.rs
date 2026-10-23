@@ -32,6 +32,12 @@ pub struct ExportRenderParams {
     /// render terminar; use render_progress/render_cancel para acompanhar.
     #[serde(default = "verdadeiro")]
     pub wait: bool,
+    /// Renderiza só a partir deste quadro (inclusive, 0-based). Use junto com
+    /// `end_frame`; só funciona com `wait=true`. Serve para conferir uma
+    /// parte sem renderizar tudo.
+    pub start_frame: Option<i64>,
+    /// Renderiza só até este quadro (inclusive). Use junto com `start_frame`.
+    pub end_frame: Option<i64>,
 }
 
 fn verdadeiro() -> bool {
@@ -128,6 +134,61 @@ pub struct PreviewFrameParams {
     pub output_path: String,
     #[serde(default)]
     pub overwrite: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PreviewFramesParams {
+    /// Caminho do projeto. Se omitido, usa o projeto aberto na sessão.
+    pub project_path: Option<String>,
+    /// Lista de quadros a renderizar (0-based). Informe isto OU start/end/step.
+    pub frames: Option<Vec<i64>>,
+    /// Início do intervalo (padrão: 0).
+    pub start: Option<i64>,
+    /// Fim do intervalo, inclusive (padrão: último quadro do projeto).
+    pub end: Option<i64>,
+    /// De quantos em quantos quadros (padrão: o suficiente para ~12 miniaturas).
+    pub step: Option<i64>,
+    /// Pasta onde gravar os PNGs. Padrão: uma pasta temporária do servidor.
+    pub output_dir: Option<String>,
+    /// Montar também uma única imagem com todos os quadros em grade. Padrão: true.
+    #[serde(default = "verdadeiro")]
+    pub contact_sheet: bool,
+    /// Colunas da grade (1 a 8). Padrão: 3.
+    #[serde(default = "tres")]
+    pub columns: u32,
+    /// Largura de cada miniatura na folha, em pixels. Padrão: 480.
+    #[serde(default = "quatrocentos_e_oitenta")]
+    pub thumb_width: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PreviewGifParams {
+    /// Caminho do projeto. Se omitido, usa o projeto aberto na sessão.
+    pub project_path: Option<String>,
+    /// Primeiro quadro (padrão: 0).
+    pub start: Option<i64>,
+    /// Último quadro, inclusive (padrão: o último do projeto).
+    pub end: Option<i64>,
+    /// De quantos em quantos quadros do projeto entra um quadro no GIF
+    /// (padrão: 1, ou mais se o trecho passar de 150 quadros).
+    pub step: Option<i64>,
+    /// Quadros por segundo do GIF. Padrão: a velocidade natural do projeto.
+    pub fps: Option<f64>,
+    /// Largura do GIF em pixels. Padrão: 480.
+    #[serde(default = "quatrocentos_e_oitenta")]
+    pub width: u32,
+    /// Caminho do `.gif` de saída. Padrão: uma pasta temporária do servidor.
+    pub output_path: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+fn tres() -> u32 {
+    3
+}
+
+fn quatrocentos_e_oitenta() -> u32 {
+    480
 }
 
 // -- Trilha -----------------------------------------------------------------

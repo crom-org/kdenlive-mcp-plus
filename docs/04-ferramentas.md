@@ -4,7 +4,7 @@ Ver também: [visão](01-visao.md) · [arquitetura](02-arquitetura.md) · [roadm
 
 Regra do projeto (princípio 3 em [docs/01-visao.md](01-visao.md)): uma ferramenta só aparece no `tools/list` do servidor MCP quando está **implementada e testada** (status `testada` nesta tabela). Toda ferramenta `planejada` existe só nesta documentação.
 
-**Estado atual: catálogo completo.** 91 ferramentas no `tools/list`, todas `testada`, cobertas por 91 testes automatizados (65 unitários, 19 de integração via protocolo MCP real, 3 de presets e 4 de render). As duas que tinham ficado `planejada` (`clip_reframe_vertical` e `audio_duck`) foram implementadas e verificadas medindo o resultado (D-045 e D-047 em [decisões](decisoes.md)).
+**Estado atual: catálogo completo.** 93 ferramentas no `tools/list`, todas `testada`, cobertas por 102 testes automatizados (72 unitários, 23 de integração via protocolo MCP real, 3 de presets e 4 de render). As duas que tinham ficado `planejada` (`clip_reframe_vertical` e `audio_duck`) foram implementadas e verificadas medindo o resultado (D-045 e D-047 em [decisões](decisoes.md)).
 
 ## Ferramentas desta execução, fora dos catálogos herdado/novo (Fase 0)
 
@@ -107,7 +107,7 @@ Mantidos como um conceito separado de guia, seguindo o catálogo original — ve
 | Nome | Descrição | Fase | Status |
 |---|---|---|---|
 | `export_xml` | Gera o XML do MLT/Kdenlive do projeto atual (em arquivo, ou como texto na própria resposta). | 1 | testada |
-| `export_render` | Renderiza o projeto (o aberto na sessão, ou um caminho explícito) para um arquivo final via libmlt, em processo isolado, aplicando sempre codec/bitrate explícitos do preset (nunca o nome do preset — decisão D-005). É a renomeação de `render_project` da Fase 0/1 (ver [decisões](decisoes.md)). Suporta `wait=false` para rodar em segundo plano, acompanhado por `render_progress`/`render_cancel`. | 1 | testada |
+| `export_render` | Renderiza o projeto (o aberto na sessão, ou um caminho explícito) para um arquivo final via libmlt, em processo isolado, aplicando sempre codec/bitrate explícitos do preset (nunca o nome do preset — decisão D-005). É a renomeação de `render_project` da Fase 0/1 (ver [decisões](decisoes.md)). Suporta `wait=false` para rodar em segundo plano, acompanhado por `render_progress`/`render_cancel`. | 1 | testada Com `start_frame`/`end_frame` renderiza só esse trecho (só com `wait=true`, D-051). |
 | `export_list_presets` | Lista os nomes dos presets de render disponíveis. | 1 | testada |
 
 ### Sessão
@@ -174,6 +174,8 @@ Vindas da seção 6.2 do briefing original. Nota de proveniência mantida do lev
 | `clip_set_transform` | Transformação | Define posição, escala e rotação de um clipe, via o filtro `qtblend` padrão do libmlt (`rect`+`rotation`). Repassa os valores exatos do agente, sem calcular nenhuma geometria por conta própria. | 2 | testada |
 | `clip_reframe_vertical` | Transformação | Reenquadra um clipe de vídeo/imagem para o quadro do projeto, que precisa ser vertical (`fill`: preenche e corta, sem faixas; `fit`: cabe inteiro). Mede o arquivo com o `ffprobe` (proporção de pixel e rotação incluídas), calcula o retângulo e o aplica pelo filtro `qtblend` (o "Transform" do Kdenlive), o mesmo de `clip_set_transform`. `focus_x`/`focus_y` (0 a 1) escolhem qual parte do vídeo fica visível no corte. Verificada **nos pixels do quadro renderizado** (D-045). | 2 | testada |
 | `preview_frame` | Pré-visualização | Exporta um PNG de um quadro específico do projeto (da sessão ou de um caminho explícito), em processo isolado. | 1 | testada |
+| `preview_frames` | Pré-visualização | Vários quadros de uma vez (lista, ou intervalo + passo; padrão ~12 espalhados pelo projeto), até 60: um PNG por quadro e uma folha de contato única em grade com o número e o tempo de cada quadro. Rápido: até 3 processos do motor em paralelo (D-051). | 2 | testada |
+| `preview_gif` | Pré-visualização | GIF animado de um trecho (até 150 quadros; passo, fps e largura ajustáveis) para conferir movimento sem renderizar vídeo (D-051). | 2 | testada |
 | `export_thumbnail` | Pré-visualização | Gera uma miniatura de um vídeo **já renderizado**, extraindo um quadro com `ffmpeg` direto (nunca o libmlt). | 2 | testada |
 | `project_validate` | Validação | Confere mídia faltando na bin (arquivo que não existe mais) e trilhas vazias. | 1 | testada |
 | `timeline_assemble_ranges` | Lote | Monta uma sequência a partir de vários intervalos do mesmo clipe, em sequência, numa única chamada. | 2 | testada |
