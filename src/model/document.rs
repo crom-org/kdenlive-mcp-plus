@@ -2994,8 +2994,8 @@ fn stretch_still_producer(root: &mut Element, producer_id: &str, clip_out: i64) 
 // áudio (`hide="audio"`), então o som de um clipe de vídeo precisa de uma
 // segunda entrada numa trilha de áudio, agrupada com a de vídeo num grupo
 // "AVSplit" (`kdenlive:sequenceproperties.groups`, JSON; folha =
-// "índice_mlt_da_trilha:posição:-1", confirmado em projetos salvos pelo
-// Kdenlive 26).
+// "índice_da_trilha_sem_a_black_track:posição:-1", confirmado em projetos
+// salvos pelo Kdenlive 26).
 // ---------------------------------------------------------------------------
 
 const PROP_GROUPS: &str = "kdenlive:sequenceproperties.groups";
@@ -3010,8 +3010,13 @@ pub fn clip_position(root: &Element, track_id: &str, index: usize) -> Option<i64
 /// Agrupa dois clipes como vídeo+áudio do mesmo arquivo (grupo "AVSplit").
 pub fn group_av(root: &mut Element, video: (&str, usize), audio: (&str, usize)) -> Result<(), ModelError> {
     let mut folhas = Vec::new();
+    // O índice da folha é a posição da trilha entre as trilhas de verdade, SEM a black track
+    // (`TimelineModel::getTrackIndexFromPosition`). Confirmado num projeto salvo pelo Kdenlive 26:
+    // "6:1156" aponta para a 7ª trilha da sequência. Contar a black track fazia o grupo apontar
+    // para a trilha de cima, onde não há clipe, e o Kdenlive 26 caía ao abrir (segfault).
+    let reais = track_ids(root);
     for (trilha, indice) in [video, audio] {
-        let ti = track_index(root, trilha).ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {trilha}")))?;
+        let ti = reais.iter().position(|t| t == trilha).ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {trilha}")))?;
         let pos = clip_position(root, trilha, indice)
             .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {trilha}:{indice}")))?;
         folhas.push(serde_json::json!({ "data": format!("{ti}:{pos}:-1"), "leaf": "clip", "type": "Leaf" }));
@@ -3783,5 +3788,19 @@ mod tests {
         assert_eq!(lido.style.y, Some(800));
         assert_eq!(lido.style.outline_width, 2.5);
         assert_eq!(lido.style.background_rgba.as_deref(), Some("0,0,0,170"));
+    }
+    #[test]
+    fn grupo_av_usa_o_indice_da_trilha_sem_a_black_track() {
+        let (mut doc, v1, a1) = doc_com_trilhas();
+        add_clip_to_track(&mut doc, &v1, "producer0", 0, 9, 10).expect("vídeo");
+        add_clip_to_track(&mut doc, &a1, "producer0", 0, 9, 10).expect("áudio");
+        group_av(&mut doc, (&v1, 1), (&a1, 1)).expect("grupo");
+        let reais = track_ids(&doc);
+        let esperado_v = format!("{}:10:-1", reais.iter().position(|t| *t == v1).expect("v1"));
+        let esperado_a = format!("{}:10:-1", reais.iter().position(|t| *t == a1).expect("a1"));
+        let grupos = clip_groups(&doc);
+        let folhas: Vec<String> = grupos[0]["children"].as_array().expect("folhas").iter().map(|f| f["data"].as_str().expect("data").to_string()).collect();
+        assert_eq!(folhas, vec![esperado_v, esperado_a]);
+        assert!(!folhas.iter().any(|f| f.starts_with(&format!("{}:", reais.len()))), "nenhuma folha além da última trilha");
     }
 }
