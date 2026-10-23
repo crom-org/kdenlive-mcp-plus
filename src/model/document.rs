@@ -615,23 +615,42 @@ pub fn bin_clip_ids(root: &Element) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Rótulo de cor de um clipe da bin. Convenção própria deste projeto (não
-/// confirmada como igual à do Kdenlive real — a pesquisa só confirmou
-/// `kdenlive:clipname`/`folderid`/`zone_in`/`zone_out`/`originalurl`/
-/// `proxy`/`id`/`clip_type`/`file_size`/`file_hash`, nenhuma propriedade de
-/// cor ou nota; ver docs/09-riscos-e-bugs.md).
+/// Cor de um clipe da bin. No Kdenlive a cor de um clipe é uma "tag": a
+/// propriedade `kdenlive:tags` guarda cores em hexadecimal separadas por `;`
+/// (`TagWidget`/`Bin::slotTagDropped`, código-fonte do Kdenlive). Aceita
+/// `#RRGGBB`; um clipe tem uma cor só (a nova substitui a anterior).
 pub fn bin_clip_set_color(root: &mut Element, producer_id: &str, color: &str) -> Result<(), ModelError> {
+    let limpo = color.trim().to_lowercase();
+    let valida = limpo.len() == 7
+        && limpo.starts_with('#')
+        && limpo[1..].chars().all(|c| c.is_ascii_hexdigit());
+    if !valida {
+        return Err(ModelError::Invalid(format!(
+            "cor inválida: \"{color}\" (o Kdenlive só aceita cores no formato #RRGGBB, ex. \"#ff0000\")"
+        )));
+    }
     let producer = find_producer_mut(root, producer_id)
         .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado na bin: {producer_id}")))?;
-    set_property(producer, "kdenlive-mcp-plus:color", color);
+    set_property(producer, "kdenlive:tags", &limpo);
     Ok(())
 }
 
+/// Descrição do clipe da bin (`kdenlive:description`, a "Description" da
+/// aba de propriedades do Kdenlive).
 pub fn bin_clip_set_note(root: &mut Element, producer_id: &str, note: &str) -> Result<(), ModelError> {
     let producer = find_producer_mut(root, producer_id)
         .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado na bin: {producer_id}")))?;
-    set_property(producer, "kdenlive-mcp-plus:note", note);
+    set_property(producer, "kdenlive:description", note);
     Ok(())
+}
+
+/// `(cor, nota)` de um clipe da bin, como `bin_clip_set_color`/`set_note`
+/// gravam (a cor é a primeira tag do clipe).
+pub fn bin_clip_color_note(producer: &Element) -> (Option<String>, Option<String>) {
+    let cor = get_property(producer, "kdenlive:tags")
+        .and_then(|t| t.split(';').next().map(str::to_string))
+        .filter(|c| !c.is_empty());
+    (cor, get_property(producer, "kdenlive:description").filter(|n| !n.is_empty()))
 }
 
 /// Renomeia um clipe da bin (propriedade `kdenlive:clipname`, confirmada
@@ -2109,13 +2128,23 @@ pub fn set_transition_param(
 }
 
 // ---------------------------------------------------------------------------
-// Guias e marcadores: convenção própria deste projeto (não confirmada como
-// igual ao que o Kdenlive real grava — ver docs/09-riscos-e-bugs.md),
-// guardada como JSON numa propriedade do tractor principal.
+// Guias e marcadores, no formato do próprio Kdenlive (confirmado no código-
+// fonte: `MarkerListModel::importFromJson`/`toJson`):
+// - guias da timeline: propriedade `kdenlive:sequenceproperties.guides` da
+//   sequência, JSON `[{"pos":quadro,"comment":"...","type":categoria}]`;
+// - marcadores de clipe: propriedade `kdenlive:markers` do clipe da bin, mesmo
+//   JSON, com `pos` em quadros da MÍDIA do clipe (0 = início do arquivo).
+// O Kdenlive não tem "marcador da timeline" separado de guia, então os
+// marcadores gerais deste projeto são guias da categoria `1` (azul), e as
+// guias comuns, da categoria `0`; o campo extra `id` identifica cada item
+// para as ferramentas (o Kdenlive ignora campos que não conhece, mas ao
+// salvar pela GUI ele os descarta — nesse caso os ids são regerados).
 // ---------------------------------------------------------------------------
 
-const PROP_GUIDES: &str = "kdenlive-mcp-plus:guides";
-const PROP_MARKERS: &str = "kdenlive-mcp-plus:markers";
+const PROP_GUIDES: &str = "kdenlive:sequenceproperties.guides";
+const PROP_CLIP_MARKERS: &str = "kdenlive:markers";
+const GUIDE_CATEGORY: i64 = 0;
+const TIMELINE_MARKER_CATEGORY: i64 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Guide {
@@ -2129,56 +2158,153 @@ pub struct Marker {
     pub id: String,
     pub position: i64,
     pub comment: String,
-    /// Referência de clipe (`"<trilha>:<índice>"`), se este for um
-    /// marcador de clipe em vez de um marcador geral da timeline.
-    pub clip_ref: Option<String>,
+    /// Id do clipe da bin a que o marcador pertence; `None` = marcador
+    /// geral da timeline.
+    pub clip_id: Option<String>,
 }
 
-fn ler_lista<T: for<'de> Deserialize<'de>>(root: &Element, prop: &str) -> Vec<T> {
-    main_tractor(root)
-        .and_then(|t| get_property(t, prop))
-        .and_then(|texto| serde_json::from_str(&texto).ok())
-        .unwrap_or_default()
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RawMarker {
+    pos: i64,
+    #[serde(default)]
+    comment: String,
+    #[serde(default, rename = "type")]
+    category: i64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    duration: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
 }
 
-fn escrever_lista<T: Serialize>(root: &mut Element, prop: &str, lista: &[T]) -> Result<(), ModelError> {
-    let texto = serde_json::to_string(lista).map_err(|e| ModelError::Invalid(e.to_string()))?;
-    let tractor = main_tractor_mut(root)
-        .ok_or_else(|| ModelError::NotFound("tractor principal não encontrado".to_string()))?;
-    set_property(tractor, prop, &texto);
-    Ok(())
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
-fn proximo_id_de_lista<T>(lista: &[T], prefixo: &str, id_de: impl Fn(&T) -> &str) -> String {
-    let mut max_n: i64 = -1;
-    for item in lista {
-        if let Some(num) = id_de(item).strip_prefix(prefixo).and_then(|s| s.parse::<i64>().ok()) {
-            max_n = max_n.max(num);
+#[derive(Debug, Clone, PartialEq)]
+enum Owner {
+    Sequence,
+    Clip(String),
+}
+
+fn parse_raw(texto: Option<String>) -> Vec<RawMarker> {
+    texto.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn is_guide(owner: &Owner, m: &RawMarker) -> bool {
+    *owner == Owner::Sequence && m.category != TIMELINE_MARKER_CATEGORY
+}
+
+fn id_prefix(owner: &Owner, m: &RawMarker) -> &'static str {
+    if is_guide(owner, m) { "guide" } else { "marker" }
+}
+
+/// Todos os itens (guias e marcadores), com o `id` preenchido: o gravado,
+/// ou — para itens vindos do Kdenlive, que não grava ids — um novo, a
+/// partir do maior número já usado com o mesmo prefixo.
+fn load_all(root: &Element) -> Vec<(Owner, RawMarker)> {
+    let mut itens: Vec<(Owner, RawMarker)> = Vec::new();
+    if let Some(t) = main_tractor(root) {
+        for m in parse_raw(get_property(t, PROP_GUIDES)) {
+            itens.push((Owner::Sequence, m));
         }
     }
+    for p in root.children.iter().filter_map(XMLNode::as_element).filter(|e| e.name == "producer" || e.name == "chain") {
+        if let Some(pid) = p.attributes.get("id") {
+            for m in parse_raw(get_property(p, PROP_CLIP_MARKERS)) {
+                itens.push((Owner::Clip(pid.clone()), m));
+            }
+        }
+    }
+    let mut max_n = std::collections::HashMap::<&'static str, i64>::new();
+    for (owner, m) in &itens {
+        let prefixo = id_prefix(owner, m);
+        if let Some(n) = m.id.as_deref().and_then(|i| i.strip_prefix(prefixo)).and_then(|n| n.parse::<i64>().ok()) {
+            let atual = max_n.entry(prefixo).or_insert(-1);
+            *atual = (*atual).max(n);
+        }
+    }
+    for (owner, m) in itens.iter_mut() {
+        if m.id.is_none() {
+            let prefixo = id_prefix(owner, m);
+            let proximo = max_n.entry(prefixo).or_insert(-1);
+            *proximo += 1;
+            m.id = Some(format!("{prefixo}{proximo}"));
+        }
+    }
+    itens
+}
+
+fn next_item_id(itens: &[(Owner, RawMarker)], prefixo: &str) -> String {
+    let max_n = itens
+        .iter()
+        .filter_map(|(_, m)| m.id.as_deref()?.strip_prefix(prefixo)?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(-1);
     format!("{prefixo}{}", max_n + 1)
 }
 
+/// Regrava as propriedades de guias (na sequência) e de marcadores (em cada
+/// clipe da bin) a partir de `itens`, removendo `kdenlive:markers` dos
+/// clipes que ficaram sem marcador.
+fn store_all(root: &mut Element, itens: &[(Owner, RawMarker)]) -> Result<(), ModelError> {
+    let json = |lista: Vec<&RawMarker>| serde_json::to_string(&lista).map_err(|e| ModelError::Invalid(e.to_string()));
+    let da_sequencia: Vec<&RawMarker> = itens.iter().filter(|(o, _)| *o == Owner::Sequence).map(|(_, m)| m).collect();
+    let texto = json(da_sequencia)?;
+    let tractor = main_tractor_mut(root)
+        .ok_or_else(|| ModelError::NotFound("tractor da sequência não encontrado".to_string()))?;
+    set_property(tractor, PROP_GUIDES, &texto);
+
+    let ids_de_producer: Vec<String> = root
+        .children
+        .iter()
+        .filter_map(XMLNode::as_element)
+        .filter(|e| e.name == "producer" || e.name == "chain")
+        .filter_map(|e| e.attributes.get("id").cloned())
+        .collect();
+    for pid in ids_de_producer {
+        let do_clipe: Vec<&RawMarker> = itens
+            .iter()
+            .filter(|(o, _)| matches!(o, Owner::Clip(c) if *c == pid))
+            .map(|(_, m)| m)
+            .collect();
+        let texto = if do_clipe.is_empty() { None } else { Some(json(do_clipe)?) };
+        if let Some(p) = find_producer_mut(root, &pid) {
+            match texto {
+                Some(t) => set_property(p, PROP_CLIP_MARKERS, &t),
+                None => remove_property(p, PROP_CLIP_MARKERS),
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn list_guides(root: &Element) -> Vec<Guide> {
-    ler_lista(root, PROP_GUIDES)
+    load_all(root)
+        .into_iter()
+        .filter(|(o, m)| is_guide(o, m))
+        .map(|(_, m)| Guide { id: m.id.unwrap_or_default(), position: m.pos, comment: m.comment })
+        .collect()
 }
 
 pub fn add_guide(root: &mut Element, position: i64, comment: &str) -> Result<String, ModelError> {
-    let mut lista = list_guides(root);
-    let id = proximo_id_de_lista(&lista, "guide", |g| &g.id);
-    lista.push(Guide { id: id.clone(), position, comment: comment.to_string() });
-    escrever_lista(root, PROP_GUIDES, &lista)?;
+    let mut itens = load_all(root);
+    let id = next_item_id(&itens, "guide");
+    itens.push((
+        Owner::Sequence,
+        RawMarker { pos: position, comment: comment.to_string(), category: GUIDE_CATEGORY, duration: 0, id: Some(id.clone()) },
+    ));
+    store_all(root, &itens)?;
     Ok(id)
 }
 
 pub fn remove_guide(root: &mut Element, id: &str) -> Result<(), ModelError> {
-    let mut lista = list_guides(root);
-    let antes = lista.len();
-    lista.retain(|g| g.id != id);
-    if lista.len() == antes {
+    let mut itens = load_all(root);
+    let antes = itens.len();
+    itens.retain(|(o, m)| !(is_guide(o, m) && m.id.as_deref() == Some(id)));
+    if itens.len() == antes {
         return Err(ModelError::NotFound(format!("guia não encontrada: {id}")));
     }
-    escrever_lista(root, PROP_GUIDES, &lista)
+    store_all(root, &itens)
 }
 
 pub fn get_guide(root: &Element, id: &str) -> Option<Guide> {
@@ -2191,50 +2317,88 @@ pub fn update_guide(
     position: Option<i64>,
     comment: Option<&str>,
 ) -> Result<(), ModelError> {
-    let mut lista = list_guides(root);
-    let guia = lista
+    let mut itens = load_all(root);
+    let (_, guia) = itens
         .iter_mut()
-        .find(|g| g.id == id)
+        .find(|(o, m)| is_guide(o, m) && m.id.as_deref() == Some(id))
         .ok_or_else(|| ModelError::NotFound(format!("guia não encontrada: {id}")))?;
     if let Some(p) = position {
-        guia.position = p;
+        guia.pos = p;
     }
     if let Some(c) = comment {
         guia.comment = c.to_string();
     }
-    escrever_lista(root, PROP_GUIDES, &lista)
+    store_all(root, &itens)
 }
 
 pub fn list_markers(root: &Element) -> Vec<Marker> {
-    ler_lista(root, PROP_MARKERS)
+    load_all(root)
+        .into_iter()
+        .filter(|(o, m)| !is_guide(o, m))
+        .map(|(o, m)| Marker {
+            id: m.id.unwrap_or_default(),
+            position: m.pos,
+            comment: m.comment,
+            clip_id: match o {
+                Owner::Clip(c) => Some(c),
+                Owner::Sequence => None,
+            },
+        })
+        .collect()
 }
 
+/// Descobre o clipe da bin de um `clip_ref`: `"<trilha>:<índice>"` (o clipe
+/// da bin que originou aquele corte da timeline — mesmo `kdenlive:id`, mesmo
+/// que o corte use um produtor de velocidade) ou o id de um clipe da bin.
+fn resolve_bin_clip(root: &Element, clip_ref: &str) -> Result<String, ModelError> {
+    let bin = bin_clip_ids(root);
+    if bin.iter().any(|id| id == clip_ref) {
+        return Ok(clip_ref.to_string());
+    }
+    let (track_id, indice) = clip_ref
+        .rsplit_once(':')
+        .and_then(|(t, i)| Some((t, i.parse::<usize>().ok()?)))
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {clip_ref}")))?;
+    let entry = get_clip(root, track_id, indice)
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {clip_ref}")))?;
+    let produtor_id = entry.attributes.get("producer").cloned().unwrap_or_default();
+    let kid = get_property(entry, "kdenlive:id")
+        .or_else(|| find_producer(root, &produtor_id).and_then(|p| get_property(p, "kdenlive:id")));
+    bin.into_iter()
+        .find(|id| id == &produtor_id || (kid.is_some() && find_producer(root, id).and_then(|p| get_property(p, "kdenlive:id")) == kid))
+        .ok_or_else(|| ModelError::NotFound(format!("o clipe {clip_ref} não tem um clipe correspondente na bin")))
+}
+
+/// Adiciona um marcador. Sem `clip_ref`: marcador geral da timeline (uma
+/// guia da categoria 1 no Kdenlive), `position` em quadros da timeline. Com
+/// `clip_ref` (`"<trilha>:<índice>"` ou id de clipe da bin): marcador do
+/// clipe, `position` em quadros da mídia do clipe.
 pub fn add_marker(
     root: &mut Element,
     position: i64,
     comment: &str,
     clip_ref: Option<&str>,
 ) -> Result<String, ModelError> {
-    let mut lista = list_markers(root);
-    let id = proximo_id_de_lista(&lista, "marker", |m| &m.id);
-    lista.push(Marker {
-        id: id.clone(),
-        position,
-        comment: comment.to_string(),
-        clip_ref: clip_ref.map(str::to_string),
-    });
-    escrever_lista(root, PROP_MARKERS, &lista)?;
+    let dono = match clip_ref {
+        Some(r) => Owner::Clip(resolve_bin_clip(root, r)?),
+        None => Owner::Sequence,
+    };
+    let mut itens = load_all(root);
+    let id = next_item_id(&itens, "marker");
+    let categoria = if dono == Owner::Sequence { TIMELINE_MARKER_CATEGORY } else { GUIDE_CATEGORY };
+    itens.push((dono, RawMarker { pos: position, comment: comment.to_string(), category: categoria, duration: 0, id: Some(id.clone()) }));
+    store_all(root, &itens)?;
     Ok(id)
 }
 
 pub fn remove_marker(root: &mut Element, id: &str) -> Result<(), ModelError> {
-    let mut lista = list_markers(root);
-    let antes = lista.len();
-    lista.retain(|m| m.id != id);
-    if lista.len() == antes {
+    let mut itens = load_all(root);
+    let antes = itens.len();
+    itens.retain(|(o, m)| is_guide(o, m) || m.id.as_deref() != Some(id));
+    if itens.len() == antes {
         return Err(ModelError::NotFound(format!("marcador não encontrado: {id}")));
     }
-    escrever_lista(root, PROP_MARKERS, &lista)
+    store_all(root, &itens)
 }
 
 #[cfg(test)]
@@ -2505,16 +2669,75 @@ mod tests {
     #[test]
     fn marcadores_de_timeline_e_de_clipe_coexistem() {
         let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let clip = add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a", 0, 99).expect("importa");
+        let track_id = add_track(&mut doc, "track0", TrackKind::Video).expect("trilha");
+        add_clip_to_track(&mut doc, &track_id, &clip, 10, 59, 0).expect("posiciona");
+
         let id_timeline = add_marker(&mut doc, 50, "marcador geral", None).expect("adiciona marcador de timeline");
-        let id_clipe = add_marker(&mut doc, 10, "marcador do clipe", Some("playlist0:0")).expect("adiciona marcador de clipe");
+        let id_clipe = add_marker(&mut doc, 10, "marcador do clipe", Some("track0:0")).expect("adiciona marcador de clipe");
+        let guia = add_guide(&mut doc, 7, "uma guia").expect("guia");
 
         let lista = list_markers(&doc);
-        assert_eq!(lista.len(), 2);
-        assert!(lista.iter().any(|m| m.id == id_timeline && m.clip_ref.is_none()));
-        assert!(lista.iter().any(|m| m.id == id_clipe && m.clip_ref.as_deref() == Some("playlist0:0")));
+        assert_eq!(lista.len(), 2, "guias não entram na lista de marcadores");
+        assert!(lista.iter().any(|m| m.id == id_timeline && m.clip_id.is_none()));
+        assert!(lista.iter().any(|m| m.id == id_clipe && m.clip_id.as_deref() == Some("producer0")));
+        assert_eq!(list_guides(&doc).len(), 1, "marcador geral não entra na lista de guias");
+
+        // Formato nativo do Kdenlive: o marcador do clipe vai no produtor da bin,
+        // o geral e a guia na sequência.
+        let bruto = get_property(find_producer(&doc, "producer0").unwrap(), "kdenlive:markers").expect("kdenlive:markers");
+        assert!(bruto.contains("\"pos\":10") && bruto.contains("\"comment\":\"marcador do clipe\""), "{bruto}");
+        let seq = get_property(main_tractor(&doc).unwrap(), "kdenlive:sequenceproperties.guides").expect("guides");
+        assert!(seq.contains("\"pos\":7") && seq.contains("\"pos\":50"), "{seq}");
+
+        // clip_ref inválido ou sem clipe correspondente
+        assert!(matches!(add_marker(&mut doc, 1, "x", Some("track0:9")), Err(ModelError::NotFound(_))));
+        assert!(matches!(add_marker(&mut doc, 1, "x", Some("naoexiste")), Err(ModelError::NotFound(_))));
 
         remove_marker(&mut doc, &id_timeline).expect("remove");
-        assert_eq!(list_markers(&doc).len(), 1);
+        remove_marker(&mut doc, &id_clipe).expect("remove o do clipe");
+        assert!(list_markers(&doc).is_empty());
+        assert!(
+            get_property(find_producer(&doc, "producer0").unwrap(), "kdenlive:markers").is_none(),
+            "clipe sem marcadores não deve manter a propriedade"
+        );
+        assert!(get_guide(&doc, &guia).is_some(), "remover marcador não pode apagar guia");
+    }
+
+    #[test]
+    fn guias_vindas_do_kdenlive_sem_id_ganham_ids_estaveis() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        let seq = main_tractor_mut(&mut doc).unwrap();
+        set_property(
+            seq,
+            "kdenlive:sequenceproperties.guides",
+            r#"[{"pos":25,"comment":"a","type":0},{"pos":50,"comment":"b","type":3},{"pos":75,"comment":"c","type":1}]"#,
+        );
+        let guias = list_guides(&doc);
+        assert_eq!(guias.iter().map(|g| g.position).collect::<Vec<_>>(), vec![25, 50]);
+        assert_eq!(list_markers(&doc).len(), 1, "categoria 1 é marcador geral");
+
+        let nova = add_guide(&mut doc, 99, "d").expect("adiciona");
+        let ids: Vec<String> = list_guides(&doc).into_iter().map(|g| g.id).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&nova));
+        let unicos: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unicos.len(), 3, "ids repetidos: {ids:?}");
+        let bruto = get_property(main_tractor(&doc).unwrap(), "kdenlive:sequenceproperties.guides").unwrap();
+        assert!(bruto.contains("\"type\":3"), "categoria original deve ser preservada: {bruto}");
+    }
+
+    #[test]
+    fn cor_e_nota_do_clipe_usam_as_propriedades_do_kdenlive() {
+        let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
+        add_bin_clip(&mut doc, "producer0", "/tmp/a.mp4", "a", 0, 9).expect("importa");
+        bin_clip_set_color(&mut doc, "producer0", "#FF0000").expect("cor");
+        bin_clip_set_note(&mut doc, "producer0", "uma nota").expect("nota");
+        let p = find_producer(&doc, "producer0").unwrap();
+        assert_eq!(get_property(p, "kdenlive:tags"), Some("#ff0000".to_string()));
+        assert_eq!(get_property(p, "kdenlive:description"), Some("uma nota".to_string()));
+        assert_eq!(bin_clip_color_note(p), (Some("#ff0000".to_string()), Some("uma nota".to_string())));
+        assert!(matches!(bin_clip_set_color(&mut doc, "producer0", "vermelho"), Err(ModelError::Invalid(_))));
     }
 
     #[test]

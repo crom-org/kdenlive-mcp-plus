@@ -59,8 +59,10 @@ fn main() {
     // Transição entre V1 e V2.
     document::add_transition(&mut doc, "luma", "V1", "V2").expect("add_transition");
 
-    // Guia e marcador.
+    // Guia, marcador geral e marcador de clipe (quadro 30 da mídia do clipe).
     document::add_guide(&mut doc, 25, "Guia de teste").expect("add_guide");
+    document::add_marker(&mut doc, 50, "Marcador geral", None).expect("add_marker (timeline)");
+    document::add_marker(&mut doc, 30, "Marcador do clipe", Some("V1:0")).expect("add_marker (clipe)");
 
     let xml = document::to_string_pretty(&doc).expect("to_string_pretty");
     std::fs::write("/tmp/kdenlive_mcp_teste_manual/projeto.kdenlive", &xml).expect("escrever projeto");

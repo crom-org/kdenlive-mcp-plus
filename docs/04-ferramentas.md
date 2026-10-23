@@ -98,7 +98,7 @@ Mantidos como um conceito separado de guia, seguindo o catálogo original — ve
 
 | Nome | Descrição | Fase | Status |
 |---|---|---|---|
-| `marker_add` | Adiciona um marcador de timeline ou de clipe (se `clip_ref` for dado). | 2 | testada |
+| `marker_add` | Adiciona um marcador de timeline (guia azul, categoria 2 do Kdenlive) ou de clipe (se `clip_ref` for dado: `"<trilha>:<índice>"` ou id de clipe da bin; vai em `kdenlive:markers` do clipe, `position` em quadros da mídia). | 2 | testada |
 | `marker_list` | Lista todos os marcadores. | 2 | testada |
 | `marker_remove` | Remove um marcador pelo ID. | 2 | testada |
 
@@ -129,8 +129,8 @@ As duas ferramentas granulares do catálogo original (`session_undo_step`/`sessi
 | `clip_set_speed` | Define a velocidade de reprodução de um clipe, envolvendo o produtor original num produtor `timewarp` do libmlt (confirmado em `melt -query producer`), sem alterar o produtor original nem outras instâncias dele. Verificado com render real: 100 quadros a 2x → 50 quadros, confirmado por `ffprobe`. Funciona com mídia real (produtores `avformat`); não garantido com produtores sintéticos `color`/`tone` (o `resource` do `timewarp` é resolvido como caminho de arquivo). | 2 | testada |
 | `clip_reverse` | Inverte a direção de reprodução de um clipe (alterna o sinal da velocidade atual) — mesmo mecanismo de `clip_set_speed`. | 2 | testada |
 | `clip_set_opacity` | Define a opacidade de um clipe, via o filtro `brightness`/`alpha` do libmlt, anexado à entrada do clipe. | 2 | testada |
-| `clip_set_color` | Define o rótulo de cor de um clipe **da bin** (não da timeline). Convenção própria deste projeto (`kdenlive-mcp-plus:color`) — a pesquisa sobre o formato do Kdenlive não confirmou uma propriedade equivalente real. | 2 | testada |
-| `clip_add_note` | Adiciona/atualiza uma nota de um clipe **da bin**. Mesma ressalva de convenção própria (`kdenlive-mcp-plus:note`), não confirmada. | 2 | testada |
+| `clip_set_color` | Define a cor (tag `kdenlive:tags`, `#RRGGBB`) de um clipe **da bin** (não da timeline). Formato nativo do Kdenlive (D-041). | 2 | testada |
+| `clip_add_note` | Define a descrição (`kdenlive:description`) de um clipe **da bin**. Formato nativo do Kdenlive (D-041). | 2 | testada |
 
 ### Trilha
 
@@ -188,7 +188,7 @@ Todas as ferramentas (herdadas e novas) usam `snake_case`, no formato `grupo_aca
 ## Problemas a corrigir antes de portar (do briefing original, §6.1) — status de cada um
 
 - **`session_undo`/`session_undo_step`** faziam a mesma coisa com granularidade diferente: **corrigido** — unificados em `session_undo` com parâmetro `steps`. O mesmo vale para `session_redo`/`session_redo_step`.
-- **`guide_*`/`marker_*`** têm conceitos sobrepostos: **não resolvido** — os dois foram implementados como conceitos separados, seguindo o catálogo original; nenhum modelo único foi definido nesta execução.
+- **`guide_*`/`marker_*`** têm conceitos sobrepostos: **resolvido** (D-041) — no Kdenlive tudo da timeline é guia; o marcador geral é uma guia da categoria 1 e o marcador de clipe vive no clipe da bin.
 - **`project_get_render_profiles`** era alias de `project_list_profiles`, com nome enganoso: **corrigido** — removida do catálogo.
 - **`timeline_list`, `timeline_get_info` e `track_get_info`** se sobrepunham: **parcialmente resolvido** — cada um manteve um propósito distinto (`timeline_list` é um resumo por trilha, `timeline_get_info` traz tudo incluindo os clipes de cada trilha, `track_get_info` é o detalhe de uma trilha só), mas não houve uma consolidação formal além disso.
 - **`render_queue_stop`** só marcava o estado da fila como parado, sem encerrar o processo: **corrigido** — agora encerra de verdade (`SIGTERM`), e `render_cancel` faz o equivalente para jobs assíncronos avulsos.

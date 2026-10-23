@@ -32,9 +32,16 @@ fn caminho_temporario(nome: &str) -> PathBuf {
 }
 
 async fn iniciar_cliente() -> RunningService<rmcp::RoleClient, ()> {
+    iniciar_cliente_com_env(&[]).await
+}
+
+async fn iniciar_cliente_com_env(env: &[(&str, &str)]) -> RunningService<rmcp::RoleClient, ()> {
     let exe = PathBuf::from(env!("CARGO_BIN_EXE_kdenlive-mcp-plus"));
     let mut comando = tokio::process::Command::new(exe);
     comando.arg("mcp");
+    for (k, v) in env {
+        comando.env(k, v);
+    }
     let transporte =
         TokioChildProcess::new(comando).expect("deveria conseguir iniciar o processo filho");
     ().serve(transporte)
@@ -1372,4 +1379,32 @@ async fn fase2_titulos_keyframes_legendas_audio_transformacao_e_miniatura() {
         let _ = std::fs::remove_file(caminho);
     }
     client.cancel().await.expect("fechamento limpo do cliente");
+}
+
+/// Com `KDENLIVE_MCP_AUTOSAVE=1`, cada edição regrava o projeto no caminho
+/// em que ele foi salvo pela primeira vez — sem `project_save` a cada passo.
+#[tokio::test]
+async fn autosave_regrava_o_arquivo_a_cada_edicao() {
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_autosave_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+    let alvo = dir.join("ao_vivo.kdenlive");
+
+    let client = iniciar_cliente_com_env(&[("KDENLIVE_MCP_AUTOSAVE", "1")]).await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    assert_ok(
+        &chamar(&client, "project_save", serde_json::json!({ "path": alvo.to_string_lossy() })).await,
+        "project_save",
+    );
+    let tamanho_inicial = std::fs::metadata(&alvo).expect("arquivo salvo").len();
+
+    assert_ok(
+        &chamar(&client, "guide_add", serde_json::json!({ "position": 10, "comment": "ao vivo" })).await,
+        "guide_add",
+    );
+    let texto = std::fs::read_to_string(&alvo).expect("lê o arquivo");
+    assert!(texto.contains("ao vivo"), "a guia deveria ter sido gravada sozinha:\n{texto}");
+    assert!(std::fs::metadata(&alvo).unwrap().len() > tamanho_inicial);
+
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
 }

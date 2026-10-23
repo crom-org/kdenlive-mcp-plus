@@ -42,6 +42,11 @@ pub struct KdenliveMcpServer {
     pub(crate) render_lock: Arc<Mutex<()>>,
     pub(crate) jobs: JobRegistry,
     pub(crate) queue: RenderQueue,
+    /// Se `true` (variável de ambiente `KDENLIVE_MCP_AUTOSAVE=1`), cada
+    /// edição bem-sucedida regrava o projeto no seu caminho — para poder
+    /// acompanhá-lo no Kdenlive (File > Revert) sem pedir `project_save`
+    /// a cada passo. Só vale depois de o projeto ter um caminho.
+    pub(crate) autosave: bool,
 }
 
 impl Default for KdenliveMcpServer {
@@ -57,6 +62,7 @@ impl KdenliveMcpServer {
             render_lock: Arc::new(Mutex::new(())),
             jobs: JobRegistry::new(),
             queue: RenderQueue::new(),
+            autosave: matches!(std::env::var("KDENLIVE_MCP_AUTOSAVE").as_deref(), Ok("1" | "true" | "TRUE")),
         }
     }
 }
@@ -115,7 +121,18 @@ impl KdenliveMcpServer {
     ) -> Result<T, Value> {
         let mut guard = self.session.lock().await;
         match guard.as_mut() {
-            Some(session) => f(session).map_err(|e| erro(e.to_string())),
+            Some(session) => {
+                let resultado = f(session).map_err(|e| erro(e.to_string()));
+                if resultado.is_ok()
+                    && self.autosave
+                    && let Err(e) = session.autosave()
+                {
+                    // A edição já foi aplicada; falhar o autosave não deve
+                    // virar erro da ferramenta (o agente pode chamar project_save).
+                    eprintln!("kdenlive-mcp-plus: autosave falhou: {e}");
+                }
+                resultado
+            }
             None => Err(erro(SEM_PROJETO_ABERTO)),
         }
     }
@@ -490,18 +507,17 @@ impl KdenliveMcpServer {
     }
 
     #[tool(
-        description = "Set a color label on a bin clip (hex like \"#ff0000\" or a name). This \
-         project's own convention, not confirmed to match what real Kdenlive stores. Parameters: \
-         clip_id (the bin clip's id, required), color (required)."
+        description = "Set the color tag of a bin clip, shown in Kdenlive's project bin (hex \
+         #RRGGBB, e.g. \"#ff0000\"). Parameters: clip_id (the bin clip's id, required), color \
+         (required)."
     )]
     pub async fn clip_set_color(&self, Parameters(params): Parameters<BinClipColorParams>) -> Json<Value> {
         Json(self.clip_set_color_impl(params).await)
     }
 
     #[tool(
-        description = "Add or update a free-text note on a bin clip. This project's own \
-         convention, not confirmed to match what real Kdenlive stores. Parameters: clip_id (the \
-         bin clip's id, required), note (required)."
+        description = "Set the description (free-text note) of a bin clip, shown in Kdenlive's \
+         clip properties. Parameters: clip_id (the bin clip's id, required), note (required)."
     )]
     pub async fn clip_add_note(&self, Parameters(params): Parameters<BinClipNoteParams>) -> Json<Value> {
         Json(self.clip_add_note_impl(params).await)
@@ -615,9 +631,8 @@ impl KdenliveMcpServer {
     // -- Guias e marcadores (Fase 2) ---------------------------------------------
 
     #[tool(
-        description = "Place a navigation guide on the project timeline. This project's own \
-         convention (not confirmed to match real Kdenlive's internal guide format — see this \
-         project's documentation). Parameters: position (frames, required), comment (required)."
+        description = "Place a guide on the project timeline (shown in Kdenlive's timeline ruler \
+         and guides list). Parameters: position (frames, required), comment (required)."
     )]
     pub async fn guide_add(&self, Parameters(params): Parameters<GuideAddParams>) -> Json<Value> {
         Json(self.guide_add_impl(params).await)
@@ -648,10 +663,11 @@ impl KdenliveMcpServer {
     }
 
     #[tool(
-        description = "Add a timeline marker, or a clip marker if clip_ref is given (markers are \
-         a separate concept from guides in this project's model, following the original \
-         catalog). Parameters: position (frames, required), comment (required), clip_ref \
-         (optional, \"<track_id>:<index>\")."
+        description = "Add a timeline marker, or a clip marker if clip_ref is given. A timeline \
+         marker is a blue guide (category 2) in Kdenlive; a clip marker lives on the bin clip, \
+         and its position is in frames of the clip's media (0 = start of the file). Parameters: \
+         position (frames, required), comment (required), clip_ref (optional, \
+         \"<track_id>:<index>\" or a bin clip id)."
     )]
     pub async fn marker_add(&self, Parameters(params): Parameters<MarkerAddParams>) -> Json<Value> {
         Json(self.marker_add_impl(params).await)

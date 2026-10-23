@@ -1,7 +1,8 @@
 //! `marker_add`, `marker_list`, `marker_remove`.
 //!
-//! Convenção própria deste projeto, separada de `guide_*` (ver
-//! docs/04-ferramentas.md e `model::document`).
+//! Marcadores gerais da timeline (guias da categoria 1 no Kdenlive) e
+//! marcadores de clipe (`kdenlive:markers` do clipe da bin) — separados de
+//! `guide_*` (ver `model::document`).
 
 use serde_json::{Value, json};
 
@@ -10,7 +11,7 @@ use crate::mcp::server::KdenliveMcpServer;
 use crate::model::document::{self, Marker};
 
 fn marker_json(m: &Marker) -> Value {
-    json!({ "marker_id": m.id, "position": m.position, "comment": m.comment, "clip_ref": m.clip_ref })
+    json!({ "marker_id": m.id, "position": m.position, "comment": m.comment, "clip_id": m.clip_id })
 }
 
 impl KdenliveMcpServer {

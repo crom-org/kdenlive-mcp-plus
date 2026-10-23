@@ -90,10 +90,28 @@ impl Session {
                 )
             })?;
         let xml = document::to_string_pretty(&self.doc)?;
-        std::fs::write(&target, xml).map_err(|e| ModelError::Io(e.to_string()))?;
+        // Grava num arquivo temporário vizinho e renomeia: quem estiver
+        // lendo o projeto (ex. o Kdenlive recarregando com File > Revert)
+        // nunca pega um arquivo pela metade.
+        let nome = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let temporario = target.with_file_name(format!(".{nome}.tmp"));
+        std::fs::write(&temporario, xml).map_err(|e| ModelError::Io(e.to_string()))?;
+        std::fs::rename(&temporario, &target).map_err(|e| {
+            let _ = std::fs::remove_file(&temporario);
+            ModelError::Io(e.to_string())
+        })?;
         self.path = Some(target.clone());
         self.modified = false;
         Ok(target)
+    }
+
+    /// Regrava o projeto no caminho de origem, se ele tiver um e houver
+    /// alterações não salvas. Usado pelo modo de autosave do servidor.
+    pub fn autosave(&mut self) -> Result<(), ModelError> {
+        if self.modified && self.path.is_some() {
+            self.save(None)?;
+        }
+        Ok(())
     }
 
     /// Registra o estado atual no histórico de undo, com uma descrição
@@ -161,6 +179,36 @@ mod tests {
     use super::*;
     use crate::model::document;
     use crate::model::profile::DEFAULT_PROFILE;
+
+    #[test]
+    fn salvar_e_atomico_e_autosave_so_regrava_com_caminho_e_alteracoes() {
+        let dir = std::env::temp_dir().join(format!("kdenlive_mcp_sessao_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+        let alvo = dir.join("projeto.kdenlive");
+
+        let mut session = Session::new(DEFAULT_PROFILE).expect("perfil padrão válido");
+        session.mark_modified();
+        session.autosave().expect("sem caminho: não faz nada e não é erro");
+        assert!(!alvo.exists(), "sem caminho de origem não há onde gravar");
+
+        session.save(Some(&alvo)).expect("salva");
+        assert!(alvo.exists());
+        assert!(!dir.join(".projeto.kdenlive.tmp").exists(), "o temporário deve ser renomeado, não sobrar");
+
+        let tamanho_inicial = std::fs::metadata(&alvo).unwrap().len();
+        let id = session.alloc_producer_id();
+        document::add_bin_clip(&mut session.doc, &id, "/tmp/a.mp4", "a", 0, 9).expect("importa");
+        session.mark_modified();
+        session.autosave().expect("regrava");
+        assert!(std::fs::metadata(&alvo).unwrap().len() > tamanho_inicial, "o clipe novo deveria estar no arquivo");
+        assert!(!session.modified, "depois do autosave não há mais alterações pendentes");
+
+        let antes = std::fs::read(&alvo).unwrap();
+        session.autosave().expect("sem alterações: não regrava");
+        assert_eq!(std::fs::read(&alvo).unwrap(), antes);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn ids_alocados_pela_sessao_nunca_colidem_mesmo_apos_remover() {

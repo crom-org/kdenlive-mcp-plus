@@ -172,7 +172,7 @@ pub struct ClipSetOpacityParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct BinClipColorParams {
     pub clip_id: String,
-    /// Cor em hexadecimal (ex. "#ff0000") ou nome.
+    /// Cor em hexadecimal `#RRGGBB` (ex. "#ff0000").
     pub color: String,
 }
 
@@ -263,10 +263,12 @@ pub struct GuideUpdateParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MarkerAddParams {
+    /// Quadro do marcador: da timeline (marcador geral) ou da mídia do clipe
+    /// (se `clip_ref` for dado; 0 = início do arquivo de mídia).
     pub position: i64,
     pub comment: String,
     /// Se for um marcador de um clipe específico, em vez de um marcador
-    /// geral da timeline: `"<track_id>:<índice>"`.
+    /// geral da timeline: `"<track_id>:<índice>"` (ou o id de um clipe da bin).
     pub clip_ref: Option<String>,
 }
 
