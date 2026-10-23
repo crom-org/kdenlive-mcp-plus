@@ -23,6 +23,7 @@ impl KdenliveMcpServer {
         };
 
         let descricao = format!("importar legendas de \"{}\"", caminho.display());
+        let familia = crate::mcp::fonts::resolve_font_family(&params.font_family).await;
         let resultado = self
             .with_session_mut(|session| {
                 let fps = document::profile_fps(&session.doc);
@@ -34,7 +35,7 @@ impl KdenliveMcpServer {
                 let track_id = match &params.track_id {
                     Some(id) => id.clone(),
                     None => {
-                        let novo_id = session.alloc_playlist_id();
+                        let novo_id = session.alloc_track_id();
                         document::add_track(&mut session.doc, &novo_id, TrackKind::Video)?;
                         novo_id
                     }
@@ -49,7 +50,7 @@ impl KdenliveMcpServer {
                         &producer_id,
                         &entrada.text,
                         duracao,
-                        &params.font_family,
+                        &familia,
                         params.font_size,
                         &params.color,
                     )?;
@@ -88,10 +89,7 @@ impl KdenliveMcpServer {
                     .into_iter()
                     .filter_map(|(_, producer_id, in_f, out_f, position)| {
                         let producer = document::find_producer(&session.doc, &producer_id)?;
-                        if document::get_property(producer, "mlt_service").as_deref() != Some("pango") {
-                            return None;
-                        }
-                        let text = document::get_property(producer, "text")?;
+                        let text = document::title_spec(producer)?.text;
                         Some(SrtEntry {
                             start_frame: position,
                             end_frame: position + (out_f - in_f + 1),

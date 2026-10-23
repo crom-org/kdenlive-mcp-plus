@@ -32,7 +32,16 @@ fn main() {
     document::bin_clip_set_note(&mut doc, "producer0", "Nota de teste do kdenlive-mcp-plus").expect("bin_clip_set_note");
 
     // Título.
-    document::add_title_clip(&mut doc, "titulo0", "kdenlive-mcp-plus", 75, "Sans", 48, "0xffffffff")
+    // Mesma resolução de fonte que a ferramenta title_add faz (mcp::fonts):
+    // o Kdenlive só aceita sem aviso o nome exato de uma família instalada.
+    let fonte = std::process::Command::new("fc-match")
+        .args(["-f", "%{family[0]}", "Sans"])
+        .output()
+        .ok()
+        .map(|s| String::from_utf8_lossy(&s.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Sans".to_string());
+    document::add_title_clip(&mut doc, "titulo0", "kdenlive-mcp-plus", 75, &fonte, 96, "0xffffffff")
         .expect("add_title_clip");
 
     // Trilhas: vídeo principal, vídeo de título, áudio.

@@ -1,6 +1,7 @@
 //! Servidor MCP em transporte stdio.
 
 mod ffprobe;
+mod fonts;
 mod params;
 pub mod server;
 mod tools;

@@ -55,7 +55,7 @@ impl KdenliveMcpServer {
         let resultado = self
             .with_session_mut(|session| {
                 session.snapshot_before(descricao);
-                let id = session.alloc_playlist_id();
+                let id = session.alloc_track_id();
                 document::add_track(&mut session.doc, &id, kind)?;
                 session.mark_modified();
                 Ok(id)

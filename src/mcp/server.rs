@@ -903,9 +903,9 @@ impl KdenliveMcpServer {
 
     #[tool(
         description = "Create a title clip with text, font, color and duration, in the project \
-         bin (built on the standard MLT \"pango\" text producer — not an attempt to replicate \
-         Kdenlive's own internal title XML format, which this project could not confirm the \
-         exact schema of). Parameters: text, duration_frames (both required), font_family \
+         bin, as a native Kdenlive title (\"kdenlivetitle\" producer, editable in Kdenlive's \
+         titler; the text is centered on screen and the font name is resolved to an installed \
+         font family). Parameters: text, duration_frames (both required), font_family \
          (optional, default \"Sans\"), font_size (optional, default 48), color (optional, \
          default opaque white \"0xffffffff\", format 0xRRGGBBAA). Place it on a track with \
          timeline_add_clip like any other bin clip."
@@ -973,7 +973,7 @@ impl KdenliveMcpServer {
 
     #[tool(
         description = "Export the timeline's subtitles on a track as an .srt file: every title \
-         clip (pango producer with text) on that track becomes one SRT entry, timed from its \
+         clip (Kdenlive title with text) on that track becomes one SRT entry, timed from its \
          timeline position and the project's frame rate. Parameters: track_id, path (both \
          required). Returns ok:false if the track has no title clips."
     )]

@@ -1,11 +1,12 @@
 //! `title_add`, `title_update`.
 //!
-//! Implementados sobre o produtor `pango` padrão do MLT (texto, fonte,
-//! cor, duração) — não o formato XML interno `kdenlivetitle` do Kdenlive,
-//! cujo esquema exato não foi confirmado (ver docs/09-riscos-e-bugs.md).
+//! Títulos nativos do Kdenlive (produtor `kdenlivetitle`, ver
+//! `model::document::add_title_clip`), com a fonte resolvida para uma
+//! família instalada (`mcp::fonts`).
 
 use serde_json::{Value, json};
 
+use crate::mcp::fonts::resolve_font_family;
 use crate::mcp::params::{TitleAddParams, TitleUpdateParams};
 use crate::mcp::server::KdenliveMcpServer;
 use crate::model::document;
@@ -13,6 +14,7 @@ use crate::model::document;
 impl KdenliveMcpServer {
     pub(crate) async fn title_add_impl(&self, params: TitleAddParams) -> Value {
         let descricao = format!("criar título \"{}\"", params.text);
+        let familia = resolve_font_family(&params.font_family).await;
         let resultado = self
             .with_session_mut(|session| {
                 session.snapshot_before(descricao);
@@ -22,7 +24,7 @@ impl KdenliveMcpServer {
                     &id,
                     &params.text,
                     params.duration_frames,
-                    &params.font_family,
+                    &familia,
                     params.font_size,
                     &params.color,
                 )?;
@@ -38,6 +40,10 @@ impl KdenliveMcpServer {
 
     pub(crate) async fn title_update_impl(&self, params: TitleUpdateParams) -> Value {
         let descricao = format!("atualizar título \"{}\"", params.clip_id);
+        let familia = match &params.font_family {
+            Some(f) => Some(resolve_font_family(f).await),
+            None => None,
+        };
         let resultado = self
             .with_session_mut(|session| {
                 session.snapshot_before(descricao);
@@ -45,7 +51,7 @@ impl KdenliveMcpServer {
                     &mut session.doc,
                     &params.clip_id,
                     params.text.as_deref(),
-                    params.font_family.as_deref(),
+                    familia.as_deref(),
                     params.font_size,
                     params.color.as_deref(),
                 )?;

@@ -20,13 +20,13 @@ pub struct Session {
     /// Pilha de `(estado depois da operação, descrição da operação)`,
     /// usada para refazer.
     redo_stack: Vec<(Element, String)>,
-    /// Próximo número livre para `producerN`/`playlistN`. Inicializado uma
+    /// Próximo número livre para `producerN`/`trackN`. Inicializado uma
     /// única vez a partir do documento (na criação/abertura da sessão) e só
     /// cresce a partir daí — nunca reaproveita o id de algo removido
     /// durante a mesma sessão, mesmo que o documento volte a ficar "livre"
     /// naquele número.
     next_producer_n: u64,
-    next_playlist_n: u64,
+    next_track_n: u64,
     /// Posição do cursor de reprodução e nível de zoom da timeline — só
     /// conceitos de UI/sessão, sem efeito no render (não há player nesta
     /// fase, só headless); não são gravados no XML.
@@ -48,7 +48,7 @@ impl Session {
 
     fn from_doc(doc: Element, path: Option<PathBuf>) -> Self {
         let next_producer_n = document::next_available_n(&doc, "producer", "producer");
-        let next_playlist_n = document::next_available_n(&doc, "playlist", "playlist");
+        let next_track_n = document::next_available_n(&doc, "tractor", "track");
         Self {
             doc,
             path,
@@ -56,7 +56,7 @@ impl Session {
             history: Vec::new(),
             redo_stack: Vec::new(),
             next_producer_n,
-            next_playlist_n,
+            next_track_n,
             playhead: 0,
             zoom: 1.0,
         }
@@ -71,12 +71,12 @@ impl Session {
         format!("producer{n}")
     }
 
-    /// Aloca o próximo id de trilha (playlist) livre para esta sessão (ex.
-    /// `"playlist2"`).
-    pub fn alloc_playlist_id(&mut self) -> String {
-        let n = self.next_playlist_n;
-        self.next_playlist_n += 1;
-        format!("playlist{n}")
+    /// Aloca o próximo id de trilha livre para esta sessão (ex. `"track2"`
+    /// — o id do `<tractor>` da trilha).
+    pub fn alloc_track_id(&mut self) -> String {
+        let n = self.next_track_n;
+        self.next_track_n += 1;
+        format!("track{n}")
     }
 
     /// Salva em `path`, ou no caminho de origem se `path` for `None`.

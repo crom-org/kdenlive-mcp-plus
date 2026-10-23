@@ -4,17 +4,21 @@
 //! MLT nem garantidamente idênticas ao que o Kdenlive de verdade grava —
 //! ver docs/09-riscos-e-bugs.md):
 //!
-//! - Um único `<tractor>` por documento (a sequência principal), sempre o
-//!   **último** filho de `<mlt>`. Múltiplas sequências (recurso do Kdenlive
-//!   23+) não são suportadas nesta fase.
-//! - Cada trilha da timeline é uma `<playlist>` referenciada por um
-//!   `<track producer="...">` dentro do tractor principal.
-//! - A bin do projeto é a `<playlist id="main_bin">` — id confirmado no
-//!   `dev-docs/fileformat.md` do próprio repositório do Kdenlive (ver
-//!   docs/decisoes.md). Suas `<entry>` apontam para os `<producer>` ainda
-//!   não colocados em nenhuma trilha.
+//! - Formato do documento = o que o Kdenlive 23.08+ grava (confirmado lendo
+//!   o código-fonte das versões 23.08.5 e 26.04.1 e projetos reais salvos
+//!   pelo próprio Kdenlive — decisão D-040 em docs/decisoes.md), na ordem
+//!   exigida pelo XML do MLT (só se referencia o que já foi definido):
+//!   perfil → produtor preto `black_track` → produtores da bin → trilhas
+//!   (cada uma um `<tractor>` com duas `<playlist>`) → **sequência** (um
+//!   `<tractor>` cujo id é um UUID, com a `black_track` como trilha 0) →
+//!   `main_bin` (com `xml_retain=1`, sem o qual o Kdenlive não acha a bin) →
+//!   tractor do projeto (`kdenlive:projectTractor=1`, aponta para a
+//!   sequência). Uma única sequência por documento.
+//! - Cada clipe da bin tem `kdenlive:id` **numérico** e um
+//!   `kdenlive:control_uuid` em formato UUID — é por eles que o Kdenlive
+//!   liga um clipe da timeline ao clipe da bin ao abrir o projeto.
 //! - Uma **referência de clipe**, nas ferramentas deste servidor, é a
-//!   string `"<id da trilha>:<índice da entrada>"` (ex. `"playlist0:2"`).
+//!   string `"<id da trilha>:<índice da entrada>"` (ex. `"track0:2"`).
 //!   Não é um conceito do MLT nem do Kdenlive: é só como este servidor
 //!   localiza um clipe de volta depois de listá-lo.
 //! - Inserir um clipe numa posição além do fim atual da trilha cria um
@@ -28,7 +32,51 @@ use xmltree::{Element, EmitterConfig, XMLNode};
 use crate::model::profile;
 
 pub const MAIN_BIN_ID: &str = "main_bin";
-pub const MAIN_TRACTOR_ID: &str = "tractor0";
+/// Id do produtor de fundo preto que o Kdenlive exige como trilha 0 de toda
+/// sequência (ele o reconhece por `kdenlive:playlistid=black_track`).
+pub const BLACK_TRACK_ID: &str = "black_track";
+pub const PROJECT_TRACTOR_ID: &str = "project_tractor";
+/// Valor de `internal_added` que o Kdenlive grava nas transições internas de
+/// composição de trilha (`mix`/`qtblend`) — ele as ignora ao abrir e as
+/// recria; para o render via libmlt elas são o que mistura as trilhas.
+const INTERNAL_ADDED: &str = "237";
+const SEQUENCE_KDENLIVE_ID: &str = "1";
+const SEQUENCE_FOLDER_ID: &str = "2";
+
+/// UUID v4 aleatório no formato `{xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx}`,
+/// que o `QUuid` do Kdenlive aceita (um `kdenlive:control_uuid` que não
+/// seja um UUID válido faz o Kdenlive 26 descartar o clipe da timeline).
+pub fn new_uuid() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CONTADOR: AtomicU64 = AtomicU64::new(0);
+
+    let n = CONTADOR.fetch_add(1, Ordering::Relaxed);
+    let estado = RandomState::new();
+    let mut bytes = [0u8; 16];
+    for (metade, parte) in bytes.chunks_mut(8).enumerate() {
+        let mut h = estado.build_hasher();
+        h.write_u64(n);
+        h.write_usize(metade);
+        parte.copy_from_slice(&h.finish().to_le_bytes());
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{{{}-{}-{}-{}-{}}}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
+}
+
+fn element_with_props(tag: &str, attrs: &[(&str, &str)], props: &[(&str, &str)]) -> Element {
+    let mut el = Element::new(tag);
+    for (k, v) in attrs {
+        el.attributes.insert((*k).to_string(), (*v).to_string());
+    }
+    for (k, v) in props {
+        set_property(&mut el, k, v);
+    }
+    el
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
@@ -48,17 +96,66 @@ pub fn parse(xml_text: &str) -> Result<Element, ModelError> {
     Element::parse(xml_text.as_bytes()).map_err(|e| ModelError::Parse(e.to_string()))
 }
 
+/// Serializa o documento. Antes, numa cópia, ajusta o que depende da duração
+/// atual da timeline (ver `sync_lengths`) — não muda o documento em memória.
 pub fn to_string_pretty(root: &Element) -> Result<String, ModelError> {
+    let mut copia = root.clone();
+    sync_lengths(&mut copia);
     let mut buf = Vec::new();
     let config = EmitterConfig::new()
         .perform_indent(true)
         .write_document_declaration(true);
-    root.write_with_config(&mut buf, config)
+    copia
+        .write_with_config(&mut buf, config)
         .map_err(|e| ModelError::Write(e.to_string()))?;
     String::from_utf8(buf).map_err(|e| ModelError::Write(e.to_string()))
 }
 
-/// Cria um documento novo e mínimo: perfil, bin vazia e um tractor vazio.
+/// Ajusta os `out` da black track, da sequência e do tractor do projeto para
+/// a duração atual da timeline, e dá às transições do usuário sem intervalo
+/// explícito o intervalo da timeline inteira. Necessário porque a black
+/// track tem `length` "infinito" (como no Kdenlive real): sem limitar o
+/// `out`, o render via libmlt nunca terminaria; e o Kdenlive só aceita
+/// composição com posição e duração.
+fn sync_lengths(root: &mut Element) {
+    if !has_black_track(root) {
+        return;
+    }
+    let out = (project_duration(root) - 1).max(0).to_string();
+    let seq_id = sequence_tractor_id(root);
+    for node in root.children.iter_mut() {
+        let XMLNode::Element(e) = node else { continue };
+        let id = e.attributes.get("id").cloned().unwrap_or_default();
+        if e.name == "producer" && id == BLACK_TRACK_ID {
+            e.attributes.insert("out".to_string(), out.clone());
+        } else if e.name == "tractor" && Some(&id) == seq_id.as_ref() {
+            e.attributes.insert("in".to_string(), "0".to_string());
+            e.attributes.insert("out".to_string(), out.clone());
+            for t in e.children.iter_mut().filter_map(XMLNode::as_mut_element) {
+                if t.name == "transition"
+                    && get_property(t, "internal_added").is_none()
+                    && t.attributes.get("out").is_none()
+                    && get_property(t, "out").is_none()
+                {
+                    t.attributes.insert("in".to_string(), "0".to_string());
+                    t.attributes.insert("out".to_string(), out.clone());
+                }
+            }
+        } else if e.name == "tractor" && get_property(e, "kdenlive:projectTractor").as_deref() == Some("1") {
+            e.attributes.insert("in".to_string(), "0".to_string());
+            e.attributes.insert("out".to_string(), out.clone());
+            for t in e.children.iter_mut().filter_map(XMLNode::as_mut_element).filter(|t| t.name == "track") {
+                t.attributes.insert("in".to_string(), "0".to_string());
+                t.attributes.insert("out".to_string(), out.clone());
+            }
+        }
+    }
+}
+
+/// Cria um documento novo, já no formato que o Kdenlive 23.08+ abre sem
+/// correções (ver o comentário do módulo): perfil, black track, uma
+/// sequência vazia, a bin (com a pasta de sequências do próprio Kdenlive) e o
+/// tractor do projeto.
 pub fn new_document(profile_name: &str) -> Result<Element, ModelError> {
     let profile = profile::find(profile_name).ok_or_else(|| {
         ModelError::Invalid(format!(
@@ -66,8 +163,12 @@ pub fn new_document(profile_name: &str) -> Result<Element, ModelError> {
              perfis válidos."
         ))
     })?;
+    let seq_owned = new_uuid();
+    let seq = seq_owned.as_str();
+    let pasta_seq = format!("kdenlive:folder.-1.{SEQUENCE_FOLDER_ID}");
 
     let mut root = Element::new("mlt");
+    root.attributes.insert("LC_NUMERIC".to_string(), "C".to_string());
     root.attributes.insert("version".to_string(), "7.22.0".to_string());
     root.attributes.insert("producer".to_string(), MAIN_BIN_ID.to_string());
 
@@ -77,19 +178,74 @@ pub fn new_document(profile_name: &str) -> Result<Element, ModelError> {
     }
     root.children.push(XMLNode::Element(profile_el));
 
-    let mut main_bin = Element::new("playlist");
-    main_bin.attributes.insert("id".to_string(), MAIN_BIN_ID.to_string());
-    // Confirmado no código-fonte do Kdenlive (DocumentValidator::validate,
-    // DOCUMENTVERSION em kdenlivedoc.cpp, idêntico em master e na v23.08.5):
-    // sem essa propriedade, o Kdenlive real mostra o diálogo de erro
-    // "Arquivo de projeto incorreto" ao abrir (continua mesmo assim, mas o
-    // diálogo é evitável). Ver decisão D-037 em docs/decisoes.md.
-    set_property(&mut main_bin, "kdenlive:docproperties.version", "1.1");
+    root.children.push(XMLNode::Element(element_with_props(
+        "producer",
+        &[("id", BLACK_TRACK_ID), ("in", "0"), ("out", "0")],
+        &[
+            ("length", "2147483647"),
+            ("eof", "continue"),
+            ("resource", "black"),
+            ("aspect_ratio", "1"),
+            ("mlt_service", "color"),
+            ("kdenlive:playlistid", "black_track"),
+            ("mlt_image_format", "rgba"),
+            ("set.test_audio", "0"),
+        ],
+    )));
+
+    let mut sequencia = element_with_props(
+        "tractor",
+        &[("id", seq), ("in", "0"), ("out", "0")],
+        &[
+            ("kdenlive:uuid", seq),
+            ("kdenlive:clipname", "Sequência 1"),
+            ("kdenlive:sequenceproperties.hasAudio", "1"),
+            ("kdenlive:sequenceproperties.hasVideo", "1"),
+            ("kdenlive:sequenceproperties.documentuuid", seq),
+            ("kdenlive:control_uuid", seq),
+            ("kdenlive:producer_type", "17"),
+            ("kdenlive:id", SEQUENCE_KDENLIVE_ID),
+            ("kdenlive:clip_type", "0"),
+            ("kdenlive:folderid", SEQUENCE_FOLDER_ID),
+        ],
+    );
+    sequencia
+        .children
+        .push(XMLNode::Element(element_with_props("track", &[("producer", BLACK_TRACK_ID)], &[])));
+    root.children.push(XMLNode::Element(sequencia));
+
+    let mut main_bin = element_with_props(
+        "playlist",
+        &[("id", MAIN_BIN_ID)],
+        &[
+            (pasta_seq.as_str(), "Sequências"),
+            ("kdenlive:sequenceFolder", SEQUENCE_FOLDER_ID),
+            // Sem a versão, o Kdenlive mostra "Arquivo de projeto incorreto"
+            // (DOCUMENTVERSION em kdenlivedoc.cpp; D-037).
+            ("kdenlive:docproperties.version", "1.1"),
+            ("kdenlive:docproperties.uuid", seq),
+            ("kdenlive:docproperties.opensequences", seq),
+            ("kdenlive:docproperties.activetimeline", seq),
+            ("kdenlive:docproperties.profile", profile_name),
+            // Sem isto o MLT não "retém" esta playlist e o Kdenlive abre
+            // com a bin vazia — a causa de os clipes sumirem da timeline.
+            ("xml_retain", "1"),
+        ],
+    );
+    main_bin
+        .children
+        .push(XMLNode::Element(element_with_props("entry", &[("producer", seq), ("in", "0"), ("out", "0")], &[])));
     root.children.push(XMLNode::Element(main_bin));
 
-    let mut tractor = Element::new("tractor");
-    tractor.attributes.insert("id".to_string(), MAIN_TRACTOR_ID.to_string());
-    root.children.push(XMLNode::Element(tractor));
+    let mut projeto = element_with_props(
+        "tractor",
+        &[("id", PROJECT_TRACTOR_ID), ("in", "0"), ("out", "0")],
+        &[("kdenlive:projectTractor", "1")],
+    );
+    projeto
+        .children
+        .push(XMLNode::Element(element_with_props("track", &[("producer", seq), ("in", "0"), ("out", "0")], &[])));
+    root.children.push(XMLNode::Element(projeto));
 
     Ok(root)
 }
@@ -116,8 +272,9 @@ pub fn profile_fps(root: &Element) -> f64 {
 }
 
 /// Troca o perfil de vídeo do projeto por um perfil nomeado válido (ver
-/// `model::profile`). Só altera os atributos do elemento `<profile>` —
-/// não recalcula nenhuma posição/duração já gravada na timeline.
+/// `model::profile`). Só altera o `<profile>` (e o nome do perfil gravado nas
+/// propriedades do documento) — não recalcula nenhuma posição/duração já
+/// gravada na timeline.
 pub fn set_profile(root: &mut Element, profile_name: &str) -> Result<(), ModelError> {
     let definicao = profile::find(profile_name).ok_or_else(|| {
         ModelError::Invalid(format!(
@@ -130,6 +287,11 @@ pub fn set_profile(root: &mut Element, profile_name: &str) -> Result<(), ModelEr
     elemento.attributes.clear();
     for (chave, valor) in definicao.to_xml_attrs() {
         elemento.attributes.insert(chave, valor);
+    }
+    if let Some(bin) = main_bin_mut(root)
+        && get_property(bin, "kdenlive:docproperties.profile").is_some()
+    {
+        set_property(bin, "kdenlive:docproperties.profile", profile_name);
     }
     Ok(())
 }
@@ -152,31 +314,30 @@ pub fn find_playlist_mut<'a>(root: &'a mut Element, id: &str) -> Option<&'a mut 
         .find(|e| attr_eq(e, "playlist", "id", id))
 }
 
-/// Encontra o `<tractor>` de uma trilha pelo seu id (decisão D-039, ver
-/// docs/decisoes.md: cada trilha agora é seu próprio `<tractor>`, não mais
-/// uma `<playlist>` solta — formato confirmado lendo projetos reais do
-/// Kdenlive). Não confundir com `main_tractor`, que é a sequência inteira.
-fn find_track_tractor<'a>(root: &'a Element, track_id: &str) -> Option<&'a Element> {
-    root.children.iter().filter_map(XMLNode::as_element).find(|e| attr_eq(e, "tractor", "id", track_id))
+fn find_tractor<'a>(root: &'a Element, id: &str) -> Option<&'a Element> {
+    root.children.iter().filter_map(XMLNode::as_element).find(|e| attr_eq(e, "tractor", "id", id))
 }
 
-fn find_track_tractor_mut<'a>(root: &'a mut Element, track_id: &str) -> Option<&'a mut Element> {
-    root.children.iter_mut().filter_map(XMLNode::as_mut_element).find(|e| attr_eq(e, "tractor", "id", track_id))
+fn find_tractor_mut<'a>(root: &'a mut Element, id: &str) -> Option<&'a mut Element> {
+    root.children.iter_mut().filter_map(XMLNode::as_mut_element).find(|e| attr_eq(e, "tractor", "id", id))
 }
 
 /// Id da `<playlist>` onde os clipes de uma trilha realmente ficam: a
 /// primeira das duas playlists que o `<tractor>` da trilha envolve (ver
-/// `add_track`). A segunda existe só porque o Kdenlive real sempre cria um
-/// par; este projeto não usa a segunda para nada ainda.
+/// `add_track`; a segunda existe porque o Kdenlive sempre cria o par). Em
+/// documentos antigos deste projeto a trilha era a própria `<playlist>`.
 fn track_clip_playlist_id(root: &Element, track_id: &str) -> Option<String> {
-    find_track_tractor(root, track_id)?
-        .children
-        .iter()
-        .filter_map(XMLNode::as_element)
-        .find(|e| e.name == "track")?
-        .attributes
-        .get("producer")
-        .cloned()
+    match find_tractor(root, track_id) {
+        Some(t) => t
+            .children
+            .iter()
+            .filter_map(XMLNode::as_element)
+            .find(|e| e.name == "track")?
+            .attributes
+            .get("producer")
+            .cloned(),
+        None => find_playlist(root, track_id).map(|_| track_id.to_string()),
+    }
 }
 
 /// Como `find_playlist`, mas para uma trilha (resolve o `<tractor>` da
@@ -192,18 +353,20 @@ pub fn find_track_playlist_mut<'a>(root: &'a mut Element, track_id: &str) -> Opt
     find_playlist_mut(root, &sub_id)
 }
 
+/// Produtor por id — `<producer>` ou `<chain>` (o Kdenlive grava mídia
+/// comum como `<chain>`; os dois têm a mesma forma para este módulo).
 pub fn find_producer<'a>(root: &'a Element, id: &str) -> Option<&'a Element> {
     root.children
         .iter()
         .filter_map(XMLNode::as_element)
-        .find(|e| attr_eq(e, "producer", "id", id))
+        .find(|e| attr_eq(e, "producer", "id", id) || attr_eq(e, "chain", "id", id))
 }
 
 pub fn find_producer_mut<'a>(root: &'a mut Element, id: &str) -> Option<&'a mut Element> {
     root.children
         .iter_mut()
         .filter_map(XMLNode::as_mut_element)
-        .find(|e| attr_eq(e, "producer", "id", id))
+        .find(|e| attr_eq(e, "producer", "id", id) || attr_eq(e, "chain", "id", id))
 }
 
 pub fn main_bin(root: &Element) -> Option<&Element> {
@@ -214,8 +377,31 @@ pub fn main_bin_mut(root: &mut Element) -> Option<&mut Element> {
     find_playlist_mut(root, MAIN_BIN_ID)
 }
 
-/// O tractor principal: o último `<tractor>` entre os filhos de `<mlt>`.
+/// Id da sequência: a trilha do tractor do projeto
+/// (`kdenlive:projectTractor=1`), como o Kdenlive grava.
+fn sequence_tractor_id(root: &Element) -> Option<String> {
+    root.children
+        .iter()
+        .filter_map(XMLNode::as_element)
+        .find(|e| e.name == "tractor" && get_property(e, "kdenlive:projectTractor").as_deref() == Some("1"))?
+        .children
+        .iter()
+        .filter_map(XMLNode::as_element)
+        .find(|e| e.name == "track")?
+        .attributes
+        .get("producer")
+        .cloned()
+}
+
+/// O tractor da timeline (a sequência). Em documentos sem tractor de
+/// projeto (formato antigo deste projeto, ou MLT XML comum), o último
+/// `<tractor>` entre os filhos de `<mlt>`.
 pub fn main_tractor(root: &Element) -> Option<&Element> {
+    if let Some(id) = sequence_tractor_id(root)
+        && let Some(t) = find_tractor(root, &id)
+    {
+        return Some(t);
+    }
     root.children
         .iter()
         .rev()
@@ -224,11 +410,38 @@ pub fn main_tractor(root: &Element) -> Option<&Element> {
 }
 
 pub fn main_tractor_mut(root: &mut Element) -> Option<&mut Element> {
+    if let Some(id) = sequence_tractor_id(root)
+        && find_tractor(root, &id).is_some()
+    {
+        return find_tractor_mut(root, &id);
+    }
     root.children
         .iter_mut()
         .rev()
         .filter_map(XMLNode::as_mut_element)
         .find(|e| e.name == "tractor")
+}
+
+/// Onde um produtor novo deve entrar em `root.children`: antes da primeira
+/// `<playlist>`/`<tractor>`, para ficar definido antes de qualquer trilha
+/// ou da bin que o referencie (o XML do MLT só resolve referências a
+/// elementos já definidos).
+fn producer_insert_index(root: &Element) -> usize {
+    root.children
+        .iter()
+        .position(|n| matches!(n, XMLNode::Element(e) if e.name == "playlist" || e.name == "tractor"))
+        .unwrap_or(root.children.len())
+}
+
+/// Onde os elementos de uma trilha nova devem entrar: logo antes do tractor
+/// da sequência (que vai referenciá-los).
+fn sequence_insert_index(root: &Element) -> usize {
+    let alvo = sequence_tractor_id(root);
+    let posicao = match alvo {
+        Some(id) => root.children.iter().position(|n| matches!(n, XMLNode::Element(e) if attr_eq(e, "tractor", "id", &id))),
+        None => root.children.iter().rposition(|n| matches!(n, XMLNode::Element(e) if e.name == "tractor")),
+    };
+    posicao.unwrap_or(root.children.len())
 }
 
 /// Maior número já usado num id com o prefixo dado, mais um (ex. se existem
@@ -289,6 +502,45 @@ pub fn remove_property(el: &mut Element, name: &str) {
 // Bin
 // ---------------------------------------------------------------------------
 
+/// Próximo número livre no espaço de ids da bin do Kdenlive. Clipes
+/// (`kdenlive:id`) e pastas (`kdenlive:folder.<pai>.<id>`) dividem o mesmo
+/// espaço: o Kdenlive 23.08 indexa os dois no mesmo mapa ao abrir o
+/// projeto, então um id repetido entre um clipe e uma pasta embaralharia a
+/// bin.
+fn next_bin_numeric_id(root: &Element) -> u64 {
+    let mut max_n: u64 = 0;
+    for el in root.children.iter().filter_map(XMLNode::as_element) {
+        if let Some(n) = get_property(el, "kdenlive:id").and_then(|v| v.parse::<u64>().ok()) {
+            max_n = max_n.max(n);
+        }
+    }
+    for (_, id, _) in all_bin_folders(root) {
+        if let Ok(n) = id.parse::<u64>() {
+            max_n = max_n.max(n);
+        }
+    }
+    max_n + 1
+}
+
+/// Dá a um produtor da bin a identidade que o Kdenlive usa para ligá-lo
+/// aos clipes da timeline: `kdenlive:id` numérico e `kdenlive:control_uuid`.
+fn assign_bin_identity(root: &Element, producer: &mut Element) {
+    set_property(producer, "kdenlive:id", &next_bin_numeric_id(root).to_string());
+    set_property(producer, "kdenlive:control_uuid", &new_uuid());
+}
+
+fn insert_bin_producer(root: &mut Element, producer: Element) -> Result<(), ModelError> {
+    let id = producer.attributes.get("id").cloned().unwrap_or_default();
+    let insert_at = producer_insert_index(root);
+    root.children.insert(insert_at, XMLNode::Element(producer));
+    let bin = main_bin_mut(root)
+        .ok_or_else(|| ModelError::NotFound(format!("playlist \"{MAIN_BIN_ID}\" não encontrada")))?;
+    let mut entry = Element::new("entry");
+    entry.attributes.insert("producer".to_string(), id);
+    bin.children.push(XMLNode::Element(entry));
+    Ok(())
+}
+
 /// Importa um arquivo de mídia como um novo produtor na bin do projeto, com
 /// o id `id` (alocado por `Session::alloc_producer_id`, nunca gerado aqui —
 /// ver o comentário de `next_available_n`). `in_frame`/`out_frame` são o
@@ -302,31 +554,14 @@ pub fn add_bin_clip(
     in_frame: i64,
     out_frame: i64,
 ) -> Result<String, ModelError> {
-    let id = id.to_string();
-
-    let mut producer = Element::new("producer");
-    producer.attributes.insert("id".to_string(), id.clone());
-    producer.attributes.insert("in".to_string(), in_frame.to_string());
-    producer.attributes.insert("out".to_string(), out_frame.to_string());
-    set_property(&mut producer, "resource", resource);
-    set_property(&mut producer, "mlt_service", "avformat");
-    set_property(&mut producer, "kdenlive:clipname", clip_name);
-    set_property(&mut producer, "kdenlive:id", &id);
-
-    let insert_at = root
-        .children
-        .iter()
-        .position(|n| matches!(n, XMLNode::Element(e) if attr_eq(e, "playlist", "id", MAIN_BIN_ID)))
-        .unwrap_or(root.children.len());
-    root.children.insert(insert_at, XMLNode::Element(producer));
-
-    let bin = main_bin_mut(root)
-        .ok_or_else(|| ModelError::NotFound(format!("playlist \"{MAIN_BIN_ID}\" não encontrada")))?;
-    let mut entry = Element::new("entry");
-    entry.attributes.insert("producer".to_string(), id.clone());
-    bin.children.push(XMLNode::Element(entry));
-
-    Ok(id)
+    let mut producer = element_with_props(
+        "producer",
+        &[("id", id), ("in", &in_frame.to_string()), ("out", &out_frame.to_string())],
+        &[("resource", resource), ("mlt_service", "avformat"), ("kdenlive:clipname", clip_name)],
+    );
+    assign_bin_identity(root, &mut producer);
+    insert_bin_producer(root, producer)?;
+    Ok(id.to_string())
 }
 
 /// Remove um produtor da bin: a entrada em `main_bin` e, se ele não estiver
@@ -356,15 +591,16 @@ pub fn remove_bin_clip(root: &mut Element, producer_id: &str) -> Result<(), Mode
         .any(|e| attr_eq(e, "entry", "producer", producer_id));
 
     if !used_elsewhere {
-        root.children.retain(
-            |n| !matches!(n, XMLNode::Element(e) if attr_eq(e, "producer", "id", producer_id)),
-        );
+        root.children.retain(|n| {
+            !matches!(n, XMLNode::Element(e) if attr_eq(e, "producer", "id", producer_id) || attr_eq(e, "chain", "id", producer_id))
+        });
     }
 
     Ok(())
 }
 
-/// Lista os ids de produtor que estão na bin (referenciados por `main_bin`).
+/// Lista os ids de produtor que estão na bin (referenciados por `main_bin`),
+/// sem a própria sequência (que o Kdenlive também lista na bin).
 pub fn bin_clip_ids(root: &Element) -> Vec<String> {
     main_bin(root)
         .map(|bin| {
@@ -373,6 +609,7 @@ pub fn bin_clip_ids(root: &Element) -> Vec<String> {
                 .filter_map(XMLNode::as_element)
                 .filter(|e| e.name == "entry")
                 .filter_map(|e| e.attributes.get("producer").cloned())
+                .filter(|id| find_tractor(root, id).is_none())
                 .collect()
         })
         .unwrap_or_default()
@@ -424,28 +661,15 @@ pub fn bin_move_clip(root: &mut Element, producer_id: &str, folder_id: Option<&s
 /// pasta>` = nome, na playlist `main_bin` (`-1` como pai = raiz). Devolve o
 /// id da pasta criada.
 pub fn create_bin_folder(root: &mut Element, parent_id: Option<&str>, nome: &str) -> Result<String, ModelError> {
+    let folder_id = next_bin_numeric_id(root).to_string();
     let bin = main_bin_mut(root)
         .ok_or_else(|| ModelError::NotFound(format!("playlist \"{MAIN_BIN_ID}\" não encontrada")))?;
-
-    let mut max_n: i64 = -1;
-    for prop in bin.children.iter().filter_map(XMLNode::as_element).filter(|e| e.name == "property") {
-        if let Some(id) = prop.attributes.get("name")
-            && let Some(resto) = id.strip_prefix("kdenlive:folder.")
-            && let Some((_, folder_n)) = resto.rsplit_once('.')
-            && let Ok(num) = folder_n.parse::<i64>()
-        {
-            max_n = max_n.max(num);
-        }
-    }
-    let folder_id = (max_n + 1).to_string();
-
     let prop_name = format!("kdenlive:folder.{}.{folder_id}", parent_id.unwrap_or("-1"));
     set_property(bin, &prop_name, nome);
     Ok(folder_id)
 }
 
-/// `(id do pai, id da pasta, nome)` de cada pasta da bin.
-pub fn list_bin_folders(root: &Element) -> Vec<(String, String, String)> {
+fn all_bin_folders(root: &Element) -> Vec<(String, String, String)> {
     let Some(bin) = main_bin(root) else {
         return Vec::new();
     };
@@ -463,6 +687,16 @@ pub fn list_bin_folders(root: &Element) -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// `(id do pai, id da pasta, nome)` de cada pasta da bin, sem a pasta de
+/// sequências que o próprio Kdenlive administra (`kdenlive:sequenceFolder`).
+pub fn list_bin_folders(root: &Element) -> Vec<(String, String, String)> {
+    let pasta_de_sequencias = main_bin(root).and_then(|b| get_property(b, "kdenlive:sequenceFolder"));
+    all_bin_folders(root)
+        .into_iter()
+        .filter(|(_, id, _)| Some(id) != pasta_de_sequencias.as_ref())
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Trilhas e clipes da timeline
 // ---------------------------------------------------------------------------
@@ -473,113 +707,10 @@ pub enum TrackKind {
     Audio,
 }
 
-/// Cria uma trilha nova e devolve seu id. Uma trilha é, hoje, três coisas
-/// (decisão D-039, ver docs/decisoes.md — formato confirmado lendo projetos
-/// reais gerados pelo Kdenlive, não o antigo `<playlist>` solta desta fase
-/// anterior): um `<tractor id="{id}">` envolvendo duas `<playlist>` (só a
-/// primeira é usada para colocar clipes; a segunda existe vazia porque o
-/// Kdenlive real sempre cria o par), mais um `<track producer="{id}">` no
-/// tractor principal — igual a antes, só que agora aponta para o tractor da
-/// trilha em vez de para uma playlist direto.
-pub fn add_track(root: &mut Element, id: &str, kind: TrackKind) -> Result<String, ModelError> {
-    let track_id = id.to_string();
-    let playlist_a_id = format!("{track_id}_a");
-    let playlist_b_id = format!("{track_id}_b");
-    // Trilha de vídeo: as duas sub-playlists só contribuem vídeo (áudio
-    // oculto). Trilha de áudio: o oposto. Confirmado no padrão real do
-    // Kdenlive (ver D-039).
-    let hide_sub = match kind {
-        TrackKind::Video => "audio",
-        TrackKind::Audio => "video",
-    };
-
-    let mut playlist_a = Element::new("playlist");
-    playlist_a.attributes.insert("id".to_string(), playlist_a_id.clone());
-    let mut playlist_b = Element::new("playlist");
-    playlist_b.attributes.insert("id".to_string(), playlist_b_id.clone());
-    if kind == TrackKind::Audio {
-        set_property(&mut playlist_a, "kdenlive:audio_track", "1");
-        set_property(&mut playlist_b, "kdenlive:audio_track", "1");
-    }
-
-    let mut track_tractor = Element::new("tractor");
-    track_tractor.attributes.insert("id".to_string(), track_id.clone());
-    track_tractor.attributes.insert("in".to_string(), "00:00:00.000".to_string());
-    // O tipo da trilha fica guardado aqui também, numa propriedade própria
-    // deste projeto — não no atributo `hide` dos `<track>` internos (que é
-    // só a repartição vídeo/áudio entre as duas sub-playlists) nem só em
-    // `kdenlive:audio_track` (que o Kdenlive real usa, mas só existe em
-    // trilhas de áudio — sem essa redundância não daríamos track_kind sem
-    // ambiguidade para uma trilha de vídeo vazia).
-    set_property(
-        &mut track_tractor,
-        "kdenlive-mcp-plus:kind",
-        match kind {
-            TrackKind::Video => "video",
-            TrackKind::Audio => "audio",
-        },
-    );
-    if kind == TrackKind::Audio {
-        set_property(&mut track_tractor, "kdenlive:audio_track", "1");
-    }
-    let mut sub_a = Element::new("track");
-    sub_a.attributes.insert("hide".to_string(), hide_sub.to_string());
-    sub_a.attributes.insert("producer".to_string(), playlist_a_id);
-    track_tractor.children.push(XMLNode::Element(sub_a));
-    let mut sub_b = Element::new("track");
-    sub_b.attributes.insert("hide".to_string(), hide_sub.to_string());
-    sub_b.attributes.insert("producer".to_string(), playlist_b_id);
-    track_tractor.children.push(XMLNode::Element(sub_b));
-
-    let insert_at = root
-        .children
-        .iter()
-        .position(|n| matches!(n, XMLNode::Element(e) if e.name == "tractor"))
-        .unwrap_or(root.children.len());
-    root.children.insert(insert_at, XMLNode::Element(playlist_a));
-    root.children.insert(insert_at + 1, XMLNode::Element(playlist_b));
-    root.children.insert(insert_at + 2, XMLNode::Element(track_tractor));
-
-    let main_tractor = main_tractor_mut(root)
-        .ok_or_else(|| ModelError::NotFound("tractor principal não encontrado".to_string()))?;
-    let mut track = Element::new("track");
-    track.attributes.insert("producer".to_string(), track_id.clone());
-    if kind == TrackKind::Audio {
-        track.attributes.insert("hide".to_string(), "video".to_string());
-    }
-    main_tractor.children.push(XMLNode::Element(track));
-
-    Ok(track_id)
-}
-
-/// Remove uma trilha (o `<track>` do tractor principal, o `<tractor>` da
-/// trilha e suas duas `<playlist>`, com todos os clipes nelas). Produtores
-/// referenciados só por essa trilha voltam para a bin se ainda estiverem
-/// referenciados por `main_bin`; nenhum produtor é apagado por esta operação.
-pub fn remove_track(root: &mut Element, track_id: &str) -> Result<(), ModelError> {
-    let (playlist_a_id, playlist_b_id) = (format!("{track_id}_a"), format!("{track_id}_b"));
-    {
-        let tractor = main_tractor_mut(root)
-            .ok_or_else(|| ModelError::NotFound("tractor principal não encontrado".to_string()))?;
-        let before = tractor.children.len();
-        tractor
-            .children
-            .retain(|n| !matches!(n, XMLNode::Element(e) if attr_eq(e, "track", "producer", track_id)));
-        if tractor.children.len() == before {
-            return Err(ModelError::NotFound(format!("trilha não encontrada: {track_id}")));
-        }
-    }
-    root.children.retain(|n| {
-        !matches!(n, XMLNode::Element(e) if attr_eq(e, "tractor", "id", track_id)
-            || attr_eq(e, "playlist", "id", &playlist_a_id)
-            || attr_eq(e, "playlist", "id", &playlist_b_id))
-    });
-    Ok(())
-}
-
-/// Lista os ids de trilha, na ordem em que aparecem no tractor principal
-/// (primeiro = mais ao fundo, última = mais acima — convenção do MLT).
-pub fn track_ids(root: &Element) -> Vec<String> {
+/// Ids, na ordem do MLT, de todos os `<track>` da sequência — inclusive a
+/// black track (índice 0 nos documentos no formato do Kdenlive). É nesse
+/// índice que `a_track`/`b_track` das transições se baseiam.
+fn sequence_tracks(root: &Element) -> Vec<String> {
     main_tractor(root)
         .map(|t| {
             t.children
@@ -592,12 +723,261 @@ pub fn track_ids(root: &Element) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn track_kind(root: &Element, track_id: &str) -> Option<TrackKind> {
-    let tractor = find_track_tractor(root, track_id)?;
-    match get_property(tractor, "kdenlive-mcp-plus:kind").as_deref() {
-        Some("audio") => Some(TrackKind::Audio),
-        _ => Some(TrackKind::Video),
+fn is_black_track(root: &Element, id: &str) -> bool {
+    id == BLACK_TRACK_ID
+        || find_producer(root, id).is_some_and(|p| get_property(p, "kdenlive:playlistid").as_deref() == Some("black_track"))
+}
+
+fn has_black_track(root: &Element) -> bool {
+    sequence_tracks(root).first().is_some_and(|id| is_black_track(root, id))
+}
+
+/// Índice MLT de uma trilha (posição entre os `<track>` da sequência,
+/// contando a black track).
+fn track_index(root: &Element, track_id: &str) -> Option<usize> {
+    sequence_tracks(root).iter().position(|id| id == track_id)
+}
+
+fn is_internal_transition(e: &Element) -> bool {
+    e.name == "transition" && get_property(e, "internal_added").is_some()
+}
+
+/// Lê `a_track`/`b_track` (propriedade ou atributo) de uma transição.
+fn transition_track(e: &Element, nome: &str) -> Option<usize> {
+    get_property(e, nome).or_else(|| e.attributes.get(nome).cloned())?.parse().ok()
+}
+
+/// Reaplica `f` aos índices `a_track`/`b_track` das transições do usuário
+/// (as internas são recriadas por `rebuild_internal_transitions`).
+/// Transições para as quais `f` devolve `None` são removidas.
+fn remap_user_transitions(root: &mut Element, f: impl Fn(usize) -> Option<usize>) {
+    let Some(tractor) = main_tractor_mut(root) else { return };
+    tractor.children.retain_mut(|n| {
+        let XMLNode::Element(e) = n else { return true };
+        if e.name != "transition" || is_internal_transition(e) {
+            return true;
+        }
+        for nome in ["a_track", "b_track"] {
+            if let Some(atual) = transition_track(e, nome) {
+                match f(atual) {
+                    Some(novo) => {
+                        e.attributes.shift_remove(nome);
+                        set_property(e, nome, &novo.to_string());
+                    }
+                    None => return false,
+                }
+            }
+        }
+        true
+    });
+}
+
+/// Recria as transições internas de composição de trilha, como o Kdenlive:
+/// para cada trilha acima da black track, um `mix` (áudio) ou um `qtblend`
+/// (vídeo) com `a_track=0`. Os `mix` ficam antes das transições do usuário
+/// e os `qtblend` depois, na mesma ordem em que o Kdenlive as planta
+/// (`TimelineModel::replantCompositions`) — é isso que faz o libmlt
+/// misturar o áudio de todas as trilhas e sobrepor os vídeos respeitando a
+/// transparência (ex. um título por cima do vídeo).
+fn rebuild_internal_transitions(root: &mut Element) {
+    if !has_black_track(root) {
+        return;
     }
+    let tipos: Vec<(usize, TrackKind)> = sequence_tracks(root)
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, id)| (i, track_kind(root, id).unwrap_or(TrackKind::Video)))
+        .collect();
+    let Some(tractor) = main_tractor_mut(root) else { return };
+    tractor.children.retain(|n| !matches!(n, XMLNode::Element(e) if is_internal_transition(e)));
+
+    let primeira_do_usuario = tractor
+        .children
+        .iter()
+        .position(|n| matches!(n, XMLNode::Element(e) if e.name == "transition"))
+        .unwrap_or(tractor.children.len());
+    let mut mixes = Vec::new();
+    for (i, tipo) in &tipos {
+        let b = i.to_string();
+        match tipo {
+            TrackKind::Audio => mixes.push(XMLNode::Element(element_with_props(
+                "transition",
+                &[("id", &format!("internal_mix{i}"))],
+                &[
+                    ("a_track", "0"),
+                    ("b_track", &b),
+                    ("mlt_service", "mix"),
+                    ("kdenlive_id", "mix"),
+                    ("internal_added", INTERNAL_ADDED),
+                    ("always_active", "1"),
+                    ("accepts_blanks", "1"),
+                    ("sum", "1"),
+                ],
+            ))),
+            TrackKind::Video => tractor.children.push(XMLNode::Element(element_with_props(
+                "transition",
+                &[("id", &format!("internal_blend{i}"))],
+                &[
+                    ("a_track", "0"),
+                    ("b_track", &b),
+                    ("compositing", "0"),
+                    ("distort", "0"),
+                    ("rotate_center", "0"),
+                    ("mlt_service", "qtblend"),
+                    ("kdenlive_id", "qtblend"),
+                    ("internal_added", INTERNAL_ADDED),
+                    ("always_active", "1"),
+                ],
+            ))),
+        }
+    }
+    for (k, m) in mixes.into_iter().enumerate() {
+        tractor.children.insert(primeira_do_usuario + k, m);
+    }
+}
+
+/// Cria uma trilha nova e devolve seu id. Como no Kdenlive real (D-039/
+/// D-040 em docs/decisoes.md), uma trilha é um `<tractor id="{id}">`
+/// envolvendo duas `<playlist>` (só a primeira recebe clipes; a segunda
+/// existe porque o Kdenlive sempre cria o par), mais um `<track>` na
+/// sequência. Trilhas de áudio entram logo acima da última trilha de áudio
+/// (ou da black track), trilhas de vídeo no topo — a mesma organização do
+/// Kdenlive, que espera as de áudio embaixo.
+pub fn add_track(root: &mut Element, id: &str, kind: TrackKind) -> Result<String, ModelError> {
+    if find_tractor(root, id).is_some() || find_playlist(root, id).is_some() {
+        return Err(ModelError::Invalid(format!("já existe um elemento com o id \"{id}\"")));
+    }
+    let track_id = id.to_string();
+    let playlist_a_id = format!("{track_id}_a");
+    let playlist_b_id = format!("{track_id}_b");
+    // Trilha de vídeo: as duas sub-playlists só contribuem vídeo (áudio
+    // oculto); trilha de áudio, o oposto — padrão dos projetos reais.
+    let hide_sub = match kind {
+        TrackKind::Video => "audio",
+        TrackKind::Audio => "video",
+    };
+
+    let mut playlist_a = element_with_props("playlist", &[("id", &playlist_a_id)], &[]);
+    let mut playlist_b = element_with_props("playlist", &[("id", &playlist_b_id)], &[]);
+    let mut track_tractor = element_with_props("tractor", &[("id", &track_id), ("in", "0")], &[]);
+    // O tipo também fica numa propriedade própria deste projeto, para
+    // `track_kind` não depender só de `kdenlive:audio_track` (que só existe
+    // em trilhas de áudio).
+    set_property(
+        &mut track_tractor,
+        "kdenlive-mcp-plus:kind",
+        match kind {
+            TrackKind::Video => "video",
+            TrackKind::Audio => "audio",
+        },
+    );
+    if kind == TrackKind::Audio {
+        set_property(&mut playlist_a, "kdenlive:audio_track", "1");
+        set_property(&mut playlist_b, "kdenlive:audio_track", "1");
+        set_property(&mut track_tractor, "kdenlive:audio_track", "1");
+    }
+    for sub in [&playlist_a_id, &playlist_b_id] {
+        track_tractor
+            .children
+            .push(XMLNode::Element(element_with_props("track", &[("hide", hide_sub), ("producer", sub)], &[])));
+    }
+
+    let insert_at = sequence_insert_index(root);
+    root.children.insert(insert_at, XMLNode::Element(playlist_a));
+    root.children.insert(insert_at + 1, XMLNode::Element(playlist_b));
+    root.children.insert(insert_at + 2, XMLNode::Element(track_tractor));
+
+    let todas = sequence_tracks(root);
+    let base = usize::from(has_black_track(root));
+    let nova_posicao = match kind {
+        TrackKind::Video => todas.len(),
+        TrackKind::Audio => todas
+            .iter()
+            .enumerate()
+            .skip(base)
+            .filter(|(_, t)| track_kind(root, t) == Some(TrackKind::Audio))
+            .map(|(i, _)| i + 1)
+            .next_back()
+            .unwrap_or(base),
+    };
+    remap_user_transitions(root, |i| Some(if i >= nova_posicao { i + 1 } else { i }));
+
+    let mut track = element_with_props("track", &[("producer", &track_id)], &[]);
+    if kind == TrackKind::Audio {
+        track.attributes.insert("hide".to_string(), "video".to_string());
+    }
+    let tractor = main_tractor_mut(root)
+        .ok_or_else(|| ModelError::NotFound("tractor da sequência não encontrado".to_string()))?;
+    let posicoes: Vec<usize> = tractor
+        .children
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| matches!(n, XMLNode::Element(e) if e.name == "track"))
+        .map(|(i, _)| i)
+        .collect();
+    let indice_filho = match posicoes.get(nova_posicao) {
+        Some(&i) => i,
+        None => posicoes.last().map(|i| i + 1).unwrap_or(tractor.children.len()),
+    };
+    tractor.children.insert(indice_filho, XMLNode::Element(track));
+
+    rebuild_internal_transitions(root);
+    Ok(track_id)
+}
+
+/// Remove uma trilha (o `<track>` da sequência, o `<tractor>` da trilha e
+/// suas `<playlist>`, com todos os clipes nelas). Transições do usuário que
+/// usavam essa trilha também são removidas; as outras são reindexadas.
+/// Nenhum produtor é apagado por esta operação.
+pub fn remove_track(root: &mut Element, track_id: &str) -> Result<(), ModelError> {
+    let indice = track_index(root, track_id)
+        .filter(|_| !is_black_track(root, track_id))
+        .ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {track_id}")))?;
+    let sub_playlists: Vec<String> = find_tractor(root, track_id)
+        .map(|t| {
+            t.children
+                .iter()
+                .filter_map(XMLNode::as_element)
+                .filter(|e| e.name == "track")
+                .filter_map(|e| e.attributes.get("producer").cloned())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![track_id.to_string()]);
+
+    remap_user_transitions(root, |i| match i.cmp(&indice) {
+        std::cmp::Ordering::Less => Some(i),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(i - 1),
+    });
+    if let Some(tractor) = main_tractor_mut(root) {
+        tractor
+            .children
+            .retain(|n| !matches!(n, XMLNode::Element(e) if attr_eq(e, "track", "producer", track_id)));
+    }
+    root.children.retain(|n| {
+        !matches!(n, XMLNode::Element(e) if attr_eq(e, "tractor", "id", track_id)
+            || (e.name == "playlist" && e.attributes.get("id").is_some_and(|id| sub_playlists.contains(id))))
+    });
+    rebuild_internal_transitions(root);
+    Ok(())
+}
+
+/// Lista os ids de trilha, na ordem em que aparecem na sequência (primeiro =
+/// mais ao fundo, último = mais acima — convenção do MLT), sem a black
+/// track.
+pub fn track_ids(root: &Element) -> Vec<String> {
+    sequence_tracks(root).into_iter().filter(|id| !is_black_track(root, id)).collect()
+}
+
+pub fn track_kind(root: &Element, track_id: &str) -> Option<TrackKind> {
+    let el = find_tractor(root, track_id).or_else(|| find_playlist(root, track_id))?;
+    Some(match get_property(el, "kdenlive-mcp-plus:kind").as_deref() {
+        Some("audio") => TrackKind::Audio,
+        Some("video") => TrackKind::Video,
+        _ if get_property(el, "kdenlive:audio_track").as_deref() == Some("1") => TrackKind::Audio,
+        _ => TrackKind::Video,
+    })
 }
 
 /// Componentes atualmente suprimidos de uma trilha: vídeo invisível e/ou
@@ -666,67 +1046,77 @@ pub fn track_hidden_muted(root: &Element, track_id: &str) -> Option<(bool, bool)
     Some(hide_components(hide))
 }
 
-/// Nome de exibição da trilha (guardado como propriedade no tractor da
-/// trilha).
+/// Nome de exibição da trilha (`kdenlive:track_name`, a propriedade que o
+/// próprio Kdenlive usa, no tractor da trilha).
 pub fn track_name(root: &Element, track_id: &str) -> Option<String> {
-    get_property(find_track_tractor(root, track_id)?, "kdenlive-mcp-plus:name")
+    let el = find_tractor(root, track_id).or_else(|| find_playlist(root, track_id))?;
+    get_property(el, "kdenlive:track_name").or_else(|| get_property(el, "kdenlive-mcp-plus:name"))
 }
 
 pub fn track_set_name(root: &mut Element, track_id: &str, nome: &str) -> Result<(), ModelError> {
-    let tractor = find_track_tractor_mut(root, track_id)
+    let el = find_tractor_mut(root, track_id)
         .ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {track_id}")))?;
-    set_property(tractor, "kdenlive-mcp-plus:name", nome);
+    set_property(el, "kdenlive:track_name", nome);
     Ok(())
 }
 
-/// Trava/destrava a trilha (conceito só de edição; não afeta o render).
+/// Trava/destrava a trilha (`kdenlive:locked_track`, lida pelo Kdenlive ao
+/// abrir; conceito só de edição, não afeta o render).
 pub fn track_set_locked(root: &mut Element, track_id: &str, locked: bool) -> Result<(), ModelError> {
-    let tractor = find_track_tractor_mut(root, track_id)
+    let el = find_tractor_mut(root, track_id)
         .ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {track_id}")))?;
-    set_property(tractor, "kdenlive-mcp-plus:locked", if locked { "1" } else { "0" });
+    set_property(el, "kdenlive:locked_track", if locked { "1" } else { "0" });
     Ok(())
 }
 
 pub fn track_is_locked(root: &Element, track_id: &str) -> bool {
-    find_track_tractor(root, track_id)
-        .and_then(|p| get_property(p, "kdenlive-mcp-plus:locked"))
+    find_tractor(root, track_id)
+        .or_else(|| find_playlist(root, track_id))
+        .and_then(|p| get_property(p, "kdenlive:locked_track").or_else(|| get_property(p, "kdenlive-mcp-plus:locked")))
         .as_deref()
         == Some("1")
 }
 
-/// Move a trilha uma posição acima (troca com a anterior na ordem do
-/// tractor). Erro se já for a primeira.
+/// Move a trilha uma posição para baixo na ordem do MLT (troca com a
+/// anterior). Erro se já for a primeira (a black track nunca se move).
 pub fn track_move_up(root: &mut Element, track_id: &str) -> Result<(), ModelError> {
     move_track(root, track_id, -1)
 }
 
-/// Move a trilha uma posição abaixo (troca com a próxima).
+/// Move a trilha uma posição para cima na ordem do MLT (troca com a próxima).
 pub fn track_move_down(root: &mut Element, track_id: &str) -> Result<(), ModelError> {
     move_track(root, track_id, 1)
 }
 
 fn move_track(root: &mut Element, track_id: &str, delta: isize) -> Result<(), ModelError> {
+    let ids = track_ids(root);
+    let posicao = ids
+        .iter()
+        .position(|id| id == track_id)
+        .ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {track_id}")))?;
+    let nova_posicao = posicao as isize + delta;
+    if nova_posicao < 0 || nova_posicao as usize >= ids.len() {
+        return Err(ModelError::Invalid(format!(
+            "a trilha \"{track_id}\" já está {}",
+            if delta < 0 { "na primeira posição" } else { "na última posição" }
+        )));
+    }
+    let outra = ids[nova_posicao as usize].clone();
+    let (Some(a), Some(b)) = (track_index(root, track_id), track_index(root, &outra)) else {
+        return Err(ModelError::NotFound(format!("trilha não encontrada: {track_id}")));
+    };
     let tractor = main_tractor_mut(root)
-        .ok_or_else(|| ModelError::NotFound("tractor principal não encontrado".to_string()))?;
-    let indices: Vec<usize> = tractor
+        .ok_or_else(|| ModelError::NotFound("tractor da sequência não encontrado".to_string()))?;
+    let filhos: Vec<usize> = tractor
         .children
         .iter()
         .enumerate()
         .filter(|(_, n)| matches!(n, XMLNode::Element(e) if e.name == "track"))
         .map(|(i, _)| i)
         .collect();
-    let posicao = indices
-        .iter()
-        .position(|&i| matches!(&tractor.children[i], XMLNode::Element(e) if attr_eq(e, "track", "producer", track_id)))
-        .ok_or_else(|| ModelError::NotFound(format!("trilha não encontrada: {track_id}")))?;
-    let nova_posicao = posicao as isize + delta;
-    if nova_posicao < 0 || nova_posicao as usize >= indices.len() {
-        return Err(ModelError::Invalid(format!(
-            "a trilha \"{track_id}\" já está {}",
-            if delta < 0 { "na primeira posição" } else { "na última posição" }
-        )));
-    }
-    tractor.children.swap(indices[posicao], indices[nova_posicao as usize]);
+    tractor.children.swap(filhos[a], filhos[b]);
+    remap_user_transitions(root, |i| Some(if i == a { b } else if i == b { a } else { i }));
+    rebuild_internal_transitions(root);
     Ok(())
 }
 
@@ -1106,6 +1496,10 @@ pub fn set_clip_speed(
         })
         .unwrap_or(1);
     let nome = get_property(original, "kdenlive:clipname").unwrap_or_else(|| producer_id.clone());
+    let identidade: Vec<(&str, String)> = ["kdenlive:id", "kdenlive:control_uuid"]
+        .into_iter()
+        .filter_map(|k| get_property(original, k).map(|v| (k, v)))
+        .collect();
 
     let novo_id = next_available_n(root, "producer", "producer");
     let novo_id = format!("producer{novo_id}");
@@ -1120,12 +1514,18 @@ pub fn set_clip_speed(
     set_property(&mut wrapper, "kdenlive-mcp-plus:original_resource", &recurso_original);
     set_property(&mut wrapper, "kdenlive-mcp-plus:original_length", &comprimento_original.to_string());
     set_property(&mut wrapper, "kdenlive-mcp-plus:speed", &velocidade.to_string());
+    // Como o Kdenlive grava um clipe com velocidade: `warp_*` (de onde ele
+    // lê a velocidade, `projectclip.cpp`) e a mesma identidade do clipe da
+    // bin, para ser religado a ele ao abrir.
+    set_property(&mut wrapper, "warp_speed", &velocidade.to_string());
+    set_property(&mut wrapper, "warp_resource", &recurso_original);
+    for chave in ["kdenlive:id", "kdenlive:control_uuid"] {
+        if let Some(v) = identidade.iter().find(|(k, _)| *k == chave).map(|(_, v)| v.clone()) {
+            set_property(&mut wrapper, chave, &v);
+        }
+    }
 
-    let insert_at = root
-        .children
-        .iter()
-        .position(|n| matches!(n, XMLNode::Element(e) if attr_eq(e, "playlist", "id", MAIN_BIN_ID)))
-        .unwrap_or(root.children.len());
+    let insert_at = producer_insert_index(root);
     root.children.insert(insert_at, XMLNode::Element(wrapper));
 
     let entry = get_clip_mut(root, track_id, index).expect("já confirmado acima que existe");
@@ -1181,7 +1581,7 @@ pub fn add_filter(root: &mut Element, track_id: &str, index: usize, service: &st
     let filter_id = next_child_id(entry, "filter", "filter");
     let mut filtro = Element::new("filter");
     filtro.attributes.insert("id".to_string(), filter_id.clone());
-    filtro.attributes.insert("mlt_service".to_string(), service.to_string());
+    set_property(&mut filtro, "mlt_service", service);
     // Sem a propriedade `kdenlive_id` (note: sem dois-pontos — convenção
     // diferente de `kdenlive:*`), o Kdenlive real marca o filtro como
     // "efeito ausente" e o remove ao abrir o projeto, mesmo que o
@@ -1215,7 +1615,7 @@ pub fn list_filters(root: &Element, track_id: &str, index: usize) -> Vec<(String
         .iter()
         .filter_map(XMLNode::as_element)
         .filter(|e| e.name == "filter")
-        .filter_map(|e| Some((e.attributes.get("id")?.clone(), e.attributes.get("mlt_service")?.clone())))
+        .filter_map(|e| Some((e.attributes.get("id")?.clone(), service_of(e)?)))
         .collect()
 }
 
@@ -1354,13 +1754,137 @@ pub fn keyframe_remove(
 }
 
 // ---------------------------------------------------------------------------
-// Títulos: produtor `pango` padrão do MLT (texto, fonte, cor, duração) —
-// não o formato XML interno `kdenlivetitle` do Kdenlive, cujo esquema
-// exato não foi confirmado nesta pesquisa (ver docs/09-riscos-e-bugs.md).
+// Títulos: produtor `kdenlivetitle` (o titulador do próprio Kdenlive, também
+// disponível no libmlt — confirmado com `melt -query producer=kdenlivetitle`),
+// com o conteúdo num XML `<kdenlivetitle>` guardado na propriedade `xmldata`.
+// Esquema confirmado no código-fonte do Kdenlive (`TitleDocument::xml`,
+// titledocument.cpp). Abre no Kdenlive como título editável no titulador.
+// Documentos antigos deste projeto usavam o produtor `pango`, que o
+// Kdenlive não reconhece (o título aparecia como "INVALID"): continuam
+// legíveis/editáveis aqui, mas títulos novos são sempre `kdenlivetitle`.
 // ---------------------------------------------------------------------------
 
-/// Cria um clipe de título (produtor `pango`) na bin do projeto. Devolve o
-/// id do novo produtor.
+/// Texto, fonte, tamanho (px) e cor (`R,G,B,A`) de um título.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TitleSpec {
+    pub text: String,
+    pub font_family: String,
+    pub font_size: i64,
+    pub color_rgba: String,
+}
+
+/// Converte `#RRGGBB`, `#RRGGBBAA`, `0xRRGGBB` ou `0xRRGGBBAA` para o
+/// formato `R,G,B,A` do titulador do Kdenlive (`TitleDocument::colorToString`).
+fn color_to_rgba(cor: &str) -> Result<String, ModelError> {
+    let limpo = cor.trim();
+    let hex = limpo
+        .strip_prefix('#')
+        .or_else(|| limpo.strip_prefix("0x"))
+        .or_else(|| limpo.strip_prefix("0X"))
+        .unwrap_or(limpo);
+    let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2).unwrap_or("zz"), 16);
+    let invalida = || ModelError::Invalid(format!("cor inválida: \"{cor}\" (use #RRGGBB, #RRGGBBAA ou 0xRRGGBBAA)"));
+    let (r, g, b) = (byte(0).map_err(|_| invalida())?, byte(2).map_err(|_| invalida())?, byte(4).map_err(|_| invalida())?);
+    let a = match hex.len() {
+        6 => 255,
+        8 => byte(6).map_err(|_| invalida())?,
+        _ => return Err(invalida()),
+    };
+    Ok(format!("{r},{g},{b},{a}"))
+}
+
+fn title_xmldata(root: &Element, spec: &TitleSpec) -> Result<String, ModelError> {
+    let dimensao = |nome: &str, padrao: i64| {
+        profile_element(root)
+            .and_then(|p| p.attributes.get(nome))
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(padrao)
+    };
+    let (w, h) = (dimensao("width", 1920), dimensao("height", 1080));
+    // Caixa do tamanho da largura do quadro, com alinhamento centralizado
+    // (Qt::AlignHCenter = 4): o texto fica centralizado sem precisar medir
+    // a fonte. Altura aproximada pela fonte, centralizada na vertical.
+    let caixa_h = ((spec.font_size as f64) * 1.4).round() as i64;
+    let y = ((h - caixa_h) / 2).max(0);
+
+    let tamanho = spec.font_size.to_string();
+    let (w_txt, h_txt, caixa_txt, y_txt) = (w.to_string(), h.to_string(), caixa_h.to_string(), y.to_string());
+    let mut conteudo = element_with_props(
+        "content",
+        &[
+            ("font", &spec.font_family),
+            ("font-weight", "400"),
+            ("font-pixel-size", &tamanho),
+            ("font-italic", "0"),
+            ("font-underline", "0"),
+            ("letter-spacing", "0"),
+            ("box-width", &w_txt),
+            ("box-height", &caixa_txt),
+            ("tab-width", "80"),
+            ("font-color", &spec.color_rgba),
+            ("alignment", "4"),
+            ("shadow", "0;#64000000;3;3;3"),
+            ("typewriter", "0;2;1;0;0"),
+        ],
+        &[],
+    );
+    conteudo.children.push(XMLNode::Text(spec.text.clone()));
+    let mut transform = Element::new("transform");
+    transform.children.push(XMLNode::Text("1,0,0,0,1,0,0,0,1".to_string()));
+    let mut posicao = element_with_props("position", &[("x", "0"), ("y", &y_txt)], &[]);
+    posicao.children.push(XMLNode::Element(transform));
+    let mut item = element_with_props("item", &[("type", "QGraphicsTextItem"), ("z-index", "0")], &[]);
+    item.children.push(XMLNode::Element(posicao));
+    item.children.push(XMLNode::Element(conteudo));
+
+    let viewport = format!("0,0,{w},{h}");
+    let mut titulo = element_with_props("kdenlivetitle", &[("width", &w_txt), ("height", &h_txt), ("LC_NUMERIC", "C")], &[]);
+    titulo.children.push(XMLNode::Element(item));
+    titulo.children.push(XMLNode::Element(element_with_props("startviewport", &[("rect", &viewport)], &[])));
+    titulo.children.push(XMLNode::Element(element_with_props("endviewport", &[("rect", &viewport)], &[])));
+    titulo.children.push(XMLNode::Element(element_with_props("background", &[("color", "0,0,0,0")], &[])));
+
+    let mut buf = Vec::new();
+    titulo
+        .write_with_config(&mut buf, EmitterConfig::new().write_document_declaration(false))
+        .map_err(|e| ModelError::Write(e.to_string()))?;
+    String::from_utf8(buf).map_err(|e| ModelError::Write(e.to_string()))
+}
+
+/// Lê de volta texto/fonte/tamanho/cor de um título — `kdenlivetitle` (do
+/// `xmldata`, inclusive títulos criados no próprio Kdenlive) ou `pango`
+/// (formato antigo deste projeto). `None` se o produtor não for um título.
+pub fn title_spec(producer: &Element) -> Option<TitleSpec> {
+    match get_property(producer, "mlt_service").as_deref() {
+        Some("kdenlivetitle") => {
+            let xml = parse(&get_property(producer, "xmldata")?).ok()?;
+            let conteudo = xml
+                .children
+                .iter()
+                .filter_map(XMLNode::as_element)
+                .filter(|e| attr_eq(e, "item", "type", "QGraphicsTextItem"))
+                .find_map(|item| item.get_child("content"))?;
+            Some(TitleSpec {
+                text: conteudo.get_text().map(|t| t.into_owned()).unwrap_or_default(),
+                font_family: conteudo.attributes.get("font").cloned().unwrap_or_else(|| "Sans".to_string()),
+                font_size: conteudo.attributes.get("font-pixel-size").and_then(|v| v.parse().ok()).unwrap_or(48),
+                color_rgba: conteudo.attributes.get("font-color").cloned().unwrap_or_else(|| "255,255,255,255".to_string()),
+            })
+        }
+        Some("pango") => Some(TitleSpec {
+            text: get_property(producer, "text").unwrap_or_default(),
+            font_family: get_property(producer, "family").unwrap_or_else(|| "Sans".to_string()),
+            font_size: get_property(producer, "size").and_then(|v| v.parse().ok()).unwrap_or(48),
+            color_rgba: get_property(producer, "fgcolour")
+                .and_then(|c| color_to_rgba(&c).ok())
+                .unwrap_or_else(|| "255,255,255,255".to_string()),
+        }),
+        _ => None,
+    }
+}
+
+/// Cria um clipe de título na bin do projeto. `color_hex` aceita `#RRGGBB`,
+/// `#RRGGBBAA`, `0xRRGGBB` ou `0xRRGGBBAA`. Devolve o id do novo produtor.
 #[allow(clippy::too_many_arguments)]
 pub fn add_title_clip(
     root: &mut Element,
@@ -1374,38 +1898,33 @@ pub fn add_title_clip(
     if duration_frames <= 0 {
         return Err(ModelError::Invalid("a duração precisa ser maior que zero".to_string()));
     }
-    let id = id.to_string();
-    let mut producer = Element::new("producer");
-    producer.attributes.insert("id".to_string(), id.clone());
-    producer.attributes.insert("in".to_string(), "0".to_string());
-    producer.attributes.insert("out".to_string(), (duration_frames - 1).to_string());
-    set_property(&mut producer, "mlt_service", "pango");
-    set_property(&mut producer, "text", text);
-    set_property(&mut producer, "family", font_family);
-    set_property(&mut producer, "size", &font_size.to_string());
-    set_property(&mut producer, "fgcolour", color_hex);
-    set_property(&mut producer, "bgcolour", "0x00000000");
-    set_property(&mut producer, "kdenlive:clipname", text);
-    set_property(&mut producer, "kdenlive:id", &id);
-
-    let insert_at = root
-        .children
-        .iter()
-        .position(|n| matches!(n, XMLNode::Element(e) if attr_eq(e, "playlist", "id", MAIN_BIN_ID)))
-        .unwrap_or(root.children.len());
-    root.children.insert(insert_at, XMLNode::Element(producer));
-
-    let bin = main_bin_mut(root)
-        .ok_or_else(|| ModelError::NotFound(format!("playlist \"{MAIN_BIN_ID}\" não encontrada")))?;
-    let mut entry = Element::new("entry");
-    entry.attributes.insert("producer".to_string(), id.clone());
-    bin.children.push(XMLNode::Element(entry));
-
-    Ok(id)
+    if font_size <= 0 {
+        return Err(ModelError::Invalid("o tamanho da fonte precisa ser maior que zero".to_string()));
+    }
+    let spec = TitleSpec {
+        text: text.to_string(),
+        font_family: font_family.to_string(),
+        font_size,
+        color_rgba: color_to_rgba(color_hex)?,
+    };
+    let xmldata = title_xmldata(root, &spec)?;
+    let mut producer = element_with_props(
+        "producer",
+        &[("id", id), ("in", "0"), ("out", &(duration_frames - 1).to_string())],
+        &[
+            ("length", &duration_frames.to_string()),
+            ("mlt_service", "kdenlivetitle"),
+            ("kdenlive:clipname", text),
+            ("xmldata", &xmldata),
+        ],
+    );
+    assign_bin_identity(root, &mut producer);
+    insert_bin_producer(root, producer)?;
+    Ok(id.to_string())
 }
 
 /// Atualiza texto e/ou aparência de um clipe de título já existente.
-/// Erro se `producer_id` não for um clipe de título (`mlt_service=pango`).
+/// Erro se `producer_id` não for um clipe de título.
 pub fn update_title_clip(
     root: &mut Element,
     producer_id: &str,
@@ -1414,26 +1933,37 @@ pub fn update_title_clip(
     font_size: Option<i64>,
     color_hex: Option<&str>,
 ) -> Result<(), ModelError> {
-    let producer = find_producer_mut(root, producer_id)
+    let producer = find_producer(root, producer_id)
         .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {producer_id}")))?;
-    if get_property(producer, "mlt_service").as_deref() != Some("pango") {
-        return Err(ModelError::Invalid(format!(
-            "\"{producer_id}\" não é um clipe de título (mlt_service != pango)"
-        )));
-    }
+    let mut spec = title_spec(producer)
+        .ok_or_else(|| ModelError::Invalid(format!("\"{producer_id}\" não é um clipe de título")))?;
+    let era_pango = get_property(producer, "mlt_service").as_deref() == Some("pango");
     if let Some(t) = text {
-        set_property(producer, "text", t);
-        set_property(producer, "kdenlive:clipname", t);
+        spec.text = t.to_string();
     }
     if let Some(f) = font_family {
-        set_property(producer, "family", f);
+        spec.font_family = f.to_string();
     }
     if let Some(s) = font_size {
-        set_property(producer, "size", &s.to_string());
+        if s <= 0 {
+            return Err(ModelError::Invalid("o tamanho da fonte precisa ser maior que zero".to_string()));
+        }
+        spec.font_size = s;
     }
     if let Some(c) = color_hex {
-        set_property(producer, "fgcolour", c);
+        spec.color_rgba = color_to_rgba(c)?;
     }
+    // Atualizar um título `pango` antigo já o converte para `kdenlivetitle`.
+    let xmldata = title_xmldata(root, &spec)?;
+    let producer = find_producer_mut(root, producer_id).expect("confirmado acima que existe");
+    if era_pango {
+        for antiga in ["text", "family", "size", "fgcolour", "bgcolour"] {
+            remove_property(producer, antiga);
+        }
+        set_property(producer, "mlt_service", "kdenlivetitle");
+    }
+    set_property(producer, "xmldata", &xmldata);
+    set_property(producer, "kdenlive:clipname", &spec.text);
     Ok(())
 }
 
@@ -1495,10 +2025,6 @@ pub fn set_clip_transform(
 // principal — sintaxe confirmada empiricamente com `melt`)
 // ---------------------------------------------------------------------------
 
-fn track_index(root: &Element, track_id: &str) -> Option<usize> {
-    track_ids(root).iter().position(|id| id == track_id)
-}
-
 /// Cria uma transição `service` (ex. `"luma"` para dissolve/wipe) entre as
 /// trilhas `track_a` e `track_b`. Devolve o id da transição.
 pub fn add_transition(
@@ -1515,13 +2041,18 @@ pub fn add_transition(
     let transition_id = next_child_id(tractor, "transition", "transition");
     let mut transicao = Element::new("transition");
     transicao.attributes.insert("id".to_string(), transition_id.clone());
-    transicao.attributes.insert("mlt_service".to_string(), service.to_string());
+    set_property(&mut transicao, "mlt_service", service);
     // Mesmo motivo do `kdenlive_id` em `add_filter`: sem essa propriedade o
     // Kdenlive real marca a transição como "faltando" e a remove ao abrir.
     set_property(&mut transicao, "kdenlive_id", service);
     set_property(&mut transicao, "a_track", &a.to_string());
     set_property(&mut transicao, "b_track", &b.to_string());
+    // As trilhas foram escolhidas explicitamente pelo agente: sem isto o
+    // Kdenlive "corrige" para a trilha de vídeo logo abaixo quando as duas
+    // não são vizinhas (meltBuilder, `force_track == 0`).
+    set_property(&mut transicao, "force_track", "1");
     tractor.children.push(XMLNode::Element(transicao));
+    rebuild_internal_transitions(root);
     Ok(transition_id)
 }
 
@@ -1538,6 +2069,14 @@ pub fn remove_transition(root: &mut Element, transition_id: &str) -> Result<(), 
     Ok(())
 }
 
+/// `mlt_service` de um filtro/transição — atributo (formato antigo deste
+/// projeto) ou propriedade (formato do Kdenlive).
+fn service_of(e: &Element) -> Option<String> {
+    get_property(e, "mlt_service").or_else(|| e.attributes.get("mlt_service").cloned())
+}
+
+/// `(id, mlt_service)` das transições criadas pelo usuário (sem as internas
+/// de composição de trilha).
 pub fn list_transitions(root: &Element) -> Vec<(String, String)> {
     let Some(tractor) = main_tractor(root) else {
         return Vec::new();
@@ -1546,8 +2085,8 @@ pub fn list_transitions(root: &Element) -> Vec<(String, String)> {
         .children
         .iter()
         .filter_map(XMLNode::as_element)
-        .filter(|e| e.name == "transition")
-        .filter_map(|e| Some((e.attributes.get("id")?.clone(), e.attributes.get("mlt_service")?.clone())))
+        .filter(|e| e.name == "transition" && !is_internal_transition(e))
+        .filter_map(|e| Some((e.attributes.get("id")?.clone(), service_of(e)?)))
         .collect()
 }
 
@@ -2115,20 +2654,27 @@ mod tests {
     #[test]
     fn titulo_cria_le_e_atualiza() {
         let mut doc = new_document(DEFAULT_PROFILE_PARA_TESTE).expect("perfil válido");
-        let id = add_title_clip(&mut doc, "producer0", "Olá", 50, "Sans", 48, "0xffffffff").expect("cria título");
+        let id = add_title_clip(&mut doc, "producer0", "Olá & <tchau>", 50, "Sans", 48, "0xffffffff").expect("cria título");
 
         let p = find_producer(&doc, &id).unwrap();
-        assert_eq!(get_property(p, "mlt_service"), Some("pango".to_string()));
-        assert_eq!(get_property(p, "text"), Some("Olá".to_string()));
+        assert_eq!(get_property(p, "mlt_service"), Some("kdenlivetitle".to_string()));
         assert_eq!(p.attributes.get("out"), Some(&"49".to_string()));
+        let spec = title_spec(p).expect("é um título");
+        assert_eq!(spec.text, "Olá & <tchau>", "texto com caracteres especiais deve sobreviver ao xmldata");
+        assert_eq!(spec.color_rgba, "255,255,255,255");
         assert!(bin_clip_ids(&doc).contains(&id), "título deveria entrar na bin, como qualquer clipe");
 
-        update_title_clip(&mut doc, &id, Some("Novo texto"), None, Some(72), None).expect("atualiza");
-        let p = find_producer(&doc, &id).unwrap();
-        assert_eq!(get_property(p, "text"), Some("Novo texto".to_string()));
-        assert_eq!(get_property(p, "size"), Some("72".to_string()));
+        update_title_clip(&mut doc, &id, Some("Novo texto"), None, Some(72), Some("#ff000080")).expect("atualiza");
+        let spec = title_spec(find_producer(&doc, &id).unwrap()).unwrap();
+        assert_eq!(spec.text, "Novo texto");
+        assert_eq!(spec.font_size, 72);
+        assert_eq!(spec.color_rgba, "255,0,0,128");
+        assert_eq!(spec.font_family, "Sans", "fonte não informada deve ser mantida");
 
-        // id que não é um pango deve falhar
+        let erro = update_title_clip(&mut doc, &id, None, None, None, Some("azul")).expect_err("cor inválida");
+        assert!(matches!(erro, ModelError::Invalid(_)));
+
+        // id que não é um título deve falhar
         let outro = add_bin_clip(&mut doc, "producer1", "/tmp/a.mp4", "a", 0, 9).expect("importa outro clipe");
         let erro = update_title_clip(&mut doc, &outro, Some("x"), None, None, None).expect_err("não é título");
         assert!(matches!(erro, ModelError::Invalid(_)));
