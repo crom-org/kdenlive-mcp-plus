@@ -2,7 +2,7 @@
 
 Servidor **MCP** (Model Context Protocol) em Rust que deixa um agente de IA **editar vídeo de verdade**: projeto, biblioteca de mídia, trilhas, clipes, efeitos com keyframes, transições, títulos, legendas, áudio, guias, histórico de desfazer e render final. Tudo **sem interface gráfica**, salvando no **formato nativo do Kdenlive** (`.kdenlive`, XML do MLT) e renderizando com o **libmlt**, o mesmo motor do Kdenlive. Com o Kdenlive aberto, você acompanha o vídeo sendo montado: ele recarrega sozinho a cada edição.
 
-101 ferramentas, 116 testes automatizados.
+101 ferramentas, 117 testes automatizados.
 
 > **kdenlive-mcp-plus** é um nome provisório, e a licença do projeto ainda está pendente de decisão. Ver [docs/decisoes.md](docs/decisoes.md) (D-008 e D-009).
 
@@ -307,7 +307,7 @@ cargo test -- --test-threads=1
 cargo clippy --all-targets -- -D warnings
 ```
 
-116 testes: unitários (modelo, formato, geometria do reenquadramento, aritmética do ducking), contrato MCP real via stdio, e verificações de resultado: o reenquadramento, o dissolve, os fades, a transformação animada, a imagem esticada e a caixa de fundo do título são conferidos **nos pixels** do quadro renderizado, o ducking **medindo o áudio renderizado**, e o recarregamento do Kdenlive contra um `busctl` falso (e, manualmente, contra o Kdenlive 26.04.1 e o 23.08.5 reais). Os testes que usam `ffmpeg` são ignorados se ele faltar.
+117 testes: unitários (modelo, formato, geometria do reenquadramento, aritmética do ducking), contrato MCP real via stdio, e verificações de resultado: o reenquadramento, o dissolve, os fades, a transformação animada, a imagem esticada e a caixa de fundo do título são conferidos **nos pixels** do quadro renderizado, o ducking **medindo o áudio renderizado**, e o recarregamento do Kdenlive contra um `busctl` falso (e, manualmente, contra o Kdenlive 26.04.1 e o 23.08.5 reais). Os testes que usam `ffmpeg` são ignorados se ele faltar.
 
 ## Limitações conhecidas
 
