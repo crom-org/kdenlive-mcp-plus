@@ -2,7 +2,7 @@
 
 ## 1. Licença deste projeto
 
-**Pendente.** O campo `license` não foi preenchido no `Cargo.toml` — é uma decisão do responsável pelo projeto, registrada como D-009 em [docs/decisoes.md](decisoes.md). Nenhum outro documento deste repositório deve assumir uma licença específica para o kdenlive-mcp-plus até essa decisão ser tomada.
+**MIT**, decidida pelo responsável pelo projeto em 23/10/2026 (D-009 em [docs/decisoes.md](decisoes.md)): arquivo `LICENSE` na raiz e `license = "MIT"` no `Cargo.toml`. **A verificar:** se distribuir binários ligados ao libmlt (cujos módulos podem ser GPL, ver abaixo) exige cuidados adicionais; esta execução não confirmou isso.
 
 ## 2. Dependências Rust diretas
 

@@ -4,7 +4,7 @@ Servidor **MCP** (Model Context Protocol) em Rust que deixa um agente de IA **ed
 
 101 ferramentas, 117 testes automatizados.
 
-> **kdenlive-mcp-plus** é um nome provisório, e a licença do projeto ainda está pendente de decisão. Ver [docs/decisoes.md](docs/decisoes.md) (D-008 e D-009).
+> **kdenlive-mcp-plus** é um nome provisório (D-008). Licença: [MIT](LICENSE) (D-009). Ver [docs/decisoes.md](docs/decisoes.md).
 
 ## Vídeos de demonstração
 
@@ -311,7 +311,7 @@ cargo clippy --all-targets -- -D warnings
 
 ## Limitações conhecidas
 
-- O nome e a licença do projeto estão pendentes ([docs/decisoes.md](docs/decisoes.md)).
+- O nome do projeto é provisório ([docs/decisoes.md](docs/decisoes.md)).
 - O MCP não gera áudio nem mídia: títulos e formas animadas sim; vídeo e som vêm de arquivos que você importa.
 - O Kdenlive 26.04.1 fechou uma vez, sozinho, ao abrir o painel de efeitos de um clipe animado; a causa não foi isolada ([docs/09-riscos-e-bugs.md](docs/09-riscos-e-bugs.md)).
 - O recarregamento automático depende de Linux com systemd/D-Bus; em outros sistemas use File ▸ Revert.
