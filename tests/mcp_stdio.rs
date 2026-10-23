@@ -90,6 +90,7 @@ async fn tools_list_traz_exatamente_as_ferramentas_desta_fase() {
     assert_eq!(
         nomes,
         vec![
+            "audio_duck",
             "audio_normalize",
             "audio_set_levels",
             "bin_create_folder",
@@ -1753,6 +1754,194 @@ async fn clip_reframe_vertical_reenquadra_de_verdade_e_confere_os_pixels() {
         chamar(&client, "clip_reframe_vertical", serde_json::json!({ "clip_ref": "track0:0" })).await;
     assert_eq!(horizontal["ok"], Value::Bool(false));
     assert!(horizontal["erro"].as_str().unwrap_or("").contains("vertical"), "{horizontal}");
+
+    client.cancel().await.expect("fechamento limpo do cliente");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Nível médio, em dB, de um trecho de um áudio, medido com o `ffmpeg`
+/// (`volumedetect`).
+fn nivel_medio_db(audio: &std::path::Path, inicio_s: f64, duracao_s: f64) -> f64 {
+    let saida = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-nostats", "-ss", &inicio_s.to_string(), "-t", &duracao_s.to_string(), "-i"])
+        .arg(audio)
+        .args(["-af", "volumedetect", "-f", "null", "-"])
+        .output()
+        .expect("ffmpeg executa");
+    let texto = String::from_utf8_lossy(&saida.stderr).into_owned();
+    texto
+        .lines()
+        .find_map(|l| l.split("mean_volume:").nth(1))
+        .and_then(|r| r.trim().trim_end_matches("dB").trim().parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("não achei mean_volume em:\n{texto}"))
+}
+
+/// `audio_duck` de verdade: a música (seno de 440 Hz, 6 s) é abaixada 20 dB
+/// só enquanto a voz (seno de 1000 Hz: 1 s de som, 1 s de pausa, 1 s de som,
+/// a partir de 2 s) fala — e o resultado é conferido **medindo o áudio
+/// renderizado** em janelas antes, durante e depois das falas.
+#[tokio::test]
+async fn audio_duck_abaixa_a_musica_so_enquanto_a_voz_fala_e_confere_o_audio() {
+    let ferramentas_ok = ["ffmpeg", "ffprobe"].iter().all(|p| {
+        std::process::Command::new(p).arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
+    });
+    if !ferramentas_ok {
+        eprintln!("ffmpeg/ffprobe não encontrados: teste ignorado");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("kdenlive_mcp_duck_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cria diretório temporário");
+    let musica = dir.join("musica.wav");
+    let voz = dir.join("voz.wav");
+    let gerar = |args: &[&str], saida: &std::path::Path| {
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(args)
+            .arg(saida)
+            .status()
+            .expect("ffmpeg executa")
+            .success();
+        assert!(ok, "não consegui gerar {}", saida.display());
+    };
+    gerar(&["-f", "lavfi", "-i", "sine=f=440:d=6:sample_rate=48000"], &musica);
+    gerar(
+        &["-f", "lavfi", "-i", "sine=f=1000:d=3:sample_rate=48000", "-af", "volume=enable='between(t,1,2)':volume=0"],
+        &voz,
+    );
+
+    let client = iniciar_cliente().await;
+    assert_ok(&chamar(&client, "project_new", serde_json::json!({})).await, "project_new");
+    let trilha_voz = chamar(&client, "timeline_add_track", serde_json::json!({ "kind": "audio" })).await["track_id"]
+        .as_str()
+        .expect("track_id")
+        .to_string();
+    let importar = |nome: &'static str, arquivo: std::path::PathBuf| {
+        let client = &client;
+        async move {
+            let r = chamar(
+                client,
+                "bin_import_clip",
+                serde_json::json!({ "path": arquivo.to_string_lossy(), "name": nome }),
+            )
+            .await;
+            assert_ok(&r, "bin_import_clip");
+            r["clip_id"].as_str().expect("clip_id").to_string()
+        }
+    };
+    let id_musica = importar("musica", musica.clone()).await;
+    let id_voz = importar("voz", voz.clone()).await;
+    // música na trilha de áudio padrão (track1), 0 a 6 s; voz na nova, de 2 s a 5 s
+    assert_ok(
+        &chamar(
+            &client,
+            "timeline_add_clip",
+            serde_json::json!({ "track_id": "track1", "producer_id": id_musica, "in_frame": 0, "out_frame": 149, "position": 0 }),
+        )
+        .await,
+        "timeline_add_clip música",
+    );
+    assert_ok(
+        &chamar(
+            &client,
+            "timeline_add_clip",
+            serde_json::json!({ "track_id": trilha_voz, "producer_id": id_voz, "in_frame": 0, "out_frame": 74, "position": 50 }),
+        )
+        .await,
+        "timeline_add_clip voz",
+    );
+    // a voz fica muda no render: assim só a música é medida
+    assert_ok(
+        &chamar(&client, "track_set_muted", serde_json::json!({ "track_id": trilha_voz, "value": true })).await,
+        "track_set_muted",
+    );
+
+    let renderizar = |nome: &'static str| {
+        let client = &client;
+        let alvo = dir.join(nome);
+        async move {
+            let _ = std::fs::remove_file(&alvo);
+            let r = chamar(
+                client,
+                "export_render",
+                serde_json::json!({ "output_path": alvo.to_string_lossy(), "preset": "audio_only", "overwrite": true }),
+            )
+            .await;
+            assert_ok(&r, "export_render");
+            alvo
+        }
+    };
+
+    // referência: sem ducking
+    let sem = renderizar("sem_ducking.wav").await;
+    let base = nivel_medio_db(&sem, 0.2, 1.3);
+    assert!(nivel_medio_db(&sem, 2.2, 0.6) > base - 3.0, "sem ducking o nível não deveria cair");
+
+    // com detecção de fala: duas falas, de 2 a 3 s e de 4 a 5 s
+    let duck = chamar(
+        &client,
+        "audio_duck",
+        serde_json::json!({
+            "clip_ref": "track1:0", "voice_track_id": trilha_voz,
+            "duck_db": 20, "attack_frames": 5, "release_frames": 5, "detect_speech": true,
+        }),
+    )
+    .await;
+    assert_ok(&duck, "audio_duck detect_speech");
+    let intervalos = duck["speech_intervals_frames"].as_array().expect("speech_intervals_frames");
+    assert_eq!(intervalos.len(), 2, "duas falas esperadas: {duck}");
+    let perto = |v: &Value, esperado: i64| (v.as_i64().unwrap() - esperado).abs() <= 2;
+    assert!(perto(&intervalos[0][0], 50) && perto(&intervalos[0][1], 75), "{intervalos:?}");
+    assert!(perto(&intervalos[1][0], 100) && perto(&intervalos[1][1], 125), "{intervalos:?}");
+    assert_eq!(duck["targets"][0]["ducked"], Value::Bool(true));
+
+    let com = renderizar("com_ducking.wav").await;
+    let antes = nivel_medio_db(&com, 0.2, 1.3);
+    let fala1 = nivel_medio_db(&com, 2.2, 0.6);
+    let pausa = nivel_medio_db(&com, 3.4, 0.4);
+    let fala2 = nivel_medio_db(&com, 4.2, 0.6);
+    let depois = nivel_medio_db(&com, 5.3, 0.6);
+    assert!((antes - base).abs() < 1.5, "antes da fala o nível não muda: {antes} vs {base}");
+    assert!((base - fala1 - 20.0).abs() < 3.0, "durante a fala 1 deveria cair ~20 dB: base {base}, fala {fala1}");
+    assert!((base - fala2 - 20.0).abs() < 3.0, "durante a fala 2 deveria cair ~20 dB: base {base}, fala {fala2}");
+    assert!((base - pausa).abs() < 1.5, "na pausa entre as falas o volume volta: base {base}, pausa {pausa}");
+    assert!((base - depois).abs() < 1.5, "depois das falas o volume volta: base {base}, depois {depois}");
+
+    // sem detecção: o clipe da voz inteiro (2 a 5 s) conta, inclusive a pausa
+    let inteiro = chamar(
+        &client,
+        "audio_duck",
+        serde_json::json!({
+            "clip_ref": "track1:0", "voice_track_id": trilha_voz,
+            "duck_db": 20, "attack_frames": 5, "release_frames": 5,
+        }),
+    )
+    .await;
+    assert_ok(&inteiro, "audio_duck clipe inteiro");
+    assert_eq!(inteiro["speech_intervals_frames"].as_array().map(Vec::len), Some(1));
+    let inteiro_wav = renderizar("ducking_clipe_inteiro.wav").await;
+    let pausa = nivel_medio_db(&inteiro_wav, 3.4, 0.4);
+    assert!((base - pausa - 20.0).abs() < 3.0, "sem detect_speech a pausa também fica abaixada: base {base}, pausa {pausa}");
+
+    // reaplicar troca o filtro de ducking em vez de empilhar
+    let info = chamar(&client, "clip_get_properties", serde_json::json!({ "clip_ref": "track1:0" })).await;
+    let volumes = info["filtros"].as_array().expect("filtros").iter().filter(|f| f["service"] == "volume").count();
+    assert_eq!(volumes, 1, "deveria haver um único volume (o do ducking): {info}");
+
+    // erros
+    let sem_alvo = chamar(&client, "audio_duck", serde_json::json!({ "voice_track_id": trilha_voz })).await;
+    assert_eq!(sem_alvo["ok"], Value::Bool(false));
+    let mesma = chamar(
+        &client,
+        "audio_duck",
+        serde_json::json!({ "clip_ref": format!("{trilha_voz}:0"), "voice_track_id": trilha_voz }),
+    )
+    .await;
+    assert_eq!(mesma["ok"], Value::Bool(false));
+    let sem_voz = chamar(&client, "audio_duck", serde_json::json!({ "clip_ref": "track1:0", "voice_track_id": "track1_nao_existe" })).await;
+    assert_eq!(sem_voz["ok"], Value::Bool(false));
+    let clipe_inexistente =
+        chamar(&client, "audio_duck", serde_json::json!({ "clip_ref": "track1:9", "voice_track_id": trilha_voz })).await;
+    assert_eq!(clipe_inexistente["ok"], Value::Bool(false));
 
     client.cancel().await.expect("fechamento limpo do cliente");
     let _ = std::fs::remove_dir_all(&dir);

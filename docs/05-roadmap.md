@@ -33,17 +33,17 @@ Duas observações importantes sobre essa lista:
 
 ## Fase 2 — edição completa (concluída nesta execução)
 
-**Entregue nesta execução:** praticamente todo o catálogo de edição. Das 73 ferramentas herdadas do projeto de referência, 70 foram implementadas e testadas — as 3 que faltam não desapareceram por omissão: `project_get_render_profiles` foi removida (alias enganoso de `project_list_profiles`, ver [04-ferramentas.md](04-ferramentas.md)), e `session_undo_step`/`session_redo_step` foram unificadas em `session_undo`/`session_redo` com um parâmetro `steps`. Das 20 ferramentas novas propostas, 18 foram implementadas; as 2 que faltam (`clip_reframe_vertical`, `audio_duck`) ficam `planejada`, com o motivo registrado na decisão D-034 de [decisoes.md](decisoes.md) — a primeira exigiria calcular geometria de corte/zoom sem poder verificar visualmente o resultado neste ambiente sem tela; a segunda depende de plugins LADSPA, indisponíveis aqui.
+**Entregue nesta execução:** praticamente todo o catálogo de edição. Das 73 ferramentas herdadas do projeto de referência, 70 foram implementadas e testadas — as 3 que faltam não desapareceram por omissão: `project_get_render_profiles` foi removida (alias enganoso de `project_list_profiles`, ver [04-ferramentas.md](04-ferramentas.md)), e `session_undo_step`/`session_redo_step` foram unificadas em `session_undo`/`session_redo` com um parâmetro `steps`. Das 20 ferramentas novas propostas, 18 foram implementadas na primeira passada; as 2 restantes (`clip_reframe_vertical`, `audio_duck`) ficaram `planejada` na D-034 e foram implementadas depois (D-045 e D-047, verificadas medindo pixels e áudio renderizados, o que resolveu os dois motivos da D-034).
 
-Isso dá 89 ferramentas MCP no total (contando `server_info`, fora dos dois catálogos), com 58 testes automatizados (39 unitários + 19 de integração via protocolo MCP real).
+Isso dá 91 ferramentas MCP no total (contando `server_info`, fora dos dois catálogos), com 91 testes automatizados (65 unitários + 19 de integração via protocolo MCP real + 3 de presets + 4 de render).
 
-**Critério de saída:** atingido — toda a tabela de [docs/04-ferramentas.md](04-ferramentas.md) com origem "herdada" ou fase ≤ 2 está com status `testada`, exceto as duas exceções documentadas acima.
+**Critério de saída:** atingido — toda a tabela de [docs/04-ferramentas.md](04-ferramentas.md) está com status `testada`.
 
 **Risco que se confirmou, mas foi absorvido:** o volume grande de ferramentas de fato exigiu dividir o trabalho em sub-lotes por categoria (trilha/clipe/sessão, filtros/transições, guias/marcadores, bin/perfis/lote, timeline, fila de render, títulos/keyframes/legendas/áudio/transformação/miniatura) — exatamente a mitigação já prevista aqui, e cada sub-lote foi comitado separadamente.
 
 ## Fase 3 — integração com o Kdenlive aberto
 
-As Fases 0 a 2 estão concluídas e o motor está estável (89 ferramentas, 58 testes passando), satisfazendo a condição que a decisão D-006 colocava para só então começar esta fase.
+As Fases 0 a 2 estão concluídas e o motor está estável (91 ferramentas, 91 testes passando), satisfazendo a condição que a decisão D-006 colocava para só então começar esta fase.
 
 Painéis extras e controle do Kdenlive já aberto pelo usuário, para permitir revisão em tempo real do que o agente está fazendo. Depende de uma escolha entre fazer fork do Kdenlive em C++/Qt ou controlar o Kdenlive por D-Bus (como faz o projeto de referência `mcp-kdenlive`, que usa um fork com patch próprio mais D-Bus — ver [docs/03-concorrentes.md](03-concorrentes.md)). Pesquisa nesta execução confirmou, lendo o código-fonte real do Kdenlive, que ele **não expõe nenhuma API D-Bus própria hoje** (só o `KDBusService` padrão de instância única, que nem repassa arquivo para a instância aberta) — as duas opções exigem patch no C++ do Kdenlive, não há atalho. O Kdenlive do `apt` (23.08.5) usa KF5, disponível neste ambiente (441 pacotes), o que torna um fork dessa versão tecnicamente viável aqui.
 

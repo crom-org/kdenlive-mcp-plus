@@ -2023,6 +2023,36 @@ pub fn audio_set_level(root: &mut Element, track_id: &str, index: usize, db: f64
     set_or_create_filter_param(root, track_id, index, "volume", "level", &format!("{db}dB"))
 }
 
+/// Propriedade que marca o filtro `volume` criado por `audio_duck`, para
+/// que reaplicar o ducking troque só ele e deixe em paz um `volume` do
+/// `audio_set_levels`/`audio_normalize` no mesmo clipe.
+const PROP_DUCKING: &str = "kdenlive-mcp-plus:ducking";
+
+/// Aplica o ducking ao clipe `track_id:index`: um filtro `volume` próprio,
+/// com `level` animado pelos `keyframes` `(quadro local, dB)`. Substitui o
+/// filtro de ducking anterior do clipe, se houver. Com `keyframes` vazio só
+/// remove o anterior e devolve `None`; senão devolve o id do filtro.
+pub fn set_ducking(
+    root: &mut Element,
+    track_id: &str,
+    index: usize,
+    keyframes: &[(i64, f64)],
+) -> Result<Option<String>, ModelError> {
+    let entry = get_clip_mut(root, track_id, index)
+        .ok_or_else(|| ModelError::NotFound(format!("clipe não encontrado: {track_id}:{index}")))?;
+    entry.children.retain(|n| {
+        !matches!(n, XMLNode::Element(e) if e.name == "filter" && get_property(e, PROP_DUCKING).is_some())
+    });
+    if keyframes.is_empty() {
+        return Ok(None);
+    }
+    let filter_id = add_filter(root, track_id, index, "volume")?;
+    let nivel = format_keyframes(keyframes.iter().map(|&(quadro, db)| (quadro, format!("{db}"))).collect());
+    set_filter_param(root, track_id, index, &filter_id, "level", &nivel)?;
+    set_filter_param(root, track_id, index, &filter_id, PROP_DUCKING, "1")?;
+    Ok(Some(filter_id))
+}
+
 /// Normaliza o loudness de um clipe para a amplitude alvo (em dB, ex.
 /// `-12.0` para o padrão do próprio filtro `volume`), via seu parâmetro
 /// `normalize`.

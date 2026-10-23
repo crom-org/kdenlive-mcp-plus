@@ -6,12 +6,12 @@
 
 use serde_json::{Value, json};
 
-use crate::mcp::ffprobe::probe_video_size;
+use crate::mcp::ffprobe::{probe_speech_intervals, probe_video_size};
 use crate::mcp::params::{
-    AudioNormalizeParams, AudioSetLevelsParams, ClipRefParams, ClipReframeVerticalParams, ClipSetOpacityParams,
+    AudioDuckParams, AudioNormalizeParams, AudioSetLevelsParams, ClipRefParams, ClipReframeVerticalParams, ClipSetOpacityParams,
     ClipSetSpeedParams, ClipSetTransformParams,
 };
-use crate::model::reframe;
+use crate::model::{duck, reframe};
 use crate::mcp::server::{KdenliveMcpServer, erro, parse_clip_ref};
 use crate::model::document;
 
@@ -278,6 +278,153 @@ impl KdenliveMcpServer {
                     "x": retangulo.x, "y": retangulo.y,
                     "width": retangulo.largura, "height": retangulo.altura,
                 },
+            }),
+            Err(valor_erro) => valor_erro,
+        }
+    }
+
+    /// Ducking: abaixa o clipe (ou a trilha) alvo enquanto a trilha da voz
+    /// tem som. Os trechos de fala vêm dos clipes da trilha da voz (ou, com
+    /// `detect_speech`, das partes não silenciosas deles, medidas com o
+    /// `ffmpeg`); o resultado são keyframes do `level` de um filtro `volume`.
+    pub(crate) async fn audio_duck_impl(&self, params: AudioDuckParams) -> Value {
+        if params.clip_ref.is_some() == params.track_id.is_some() {
+            return erro("informe exatamente um entre clip_ref (um clipe) e track_id (uma trilha inteira) como alvo");
+        }
+        if !(params.duck_db.is_finite() && params.duck_db != 0.0) {
+            return erro("duck_db precisa ser um número diferente de zero (ex. 12 para abaixar 12 dB)");
+        }
+        let alvo_clip = match params.clip_ref.as_deref().map(parse_clip_ref).transpose() {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let trilha_alvo = alvo_clip.as_ref().map(|(t, _)| t.clone()).or_else(|| params.track_id.clone()).unwrap_or_default();
+        if trilha_alvo == params.voice_track_id {
+            return erro("a trilha da voz e o alvo não podem ser a mesma trilha");
+        }
+        let ducking = duck::Parametros::novo(params.duck_db, params.attack_frames, params.release_frames);
+
+        // 1) clipes da voz (posição, mídia, velocidade) e fps, direto do documento
+        struct ClipeVoz {
+            posicao: i64,
+            quadros: i64,
+            inicio_midia: i64,
+            recurso: Option<String>,
+            velocidade: f64,
+        }
+        let leitura = self
+            .with_session(|session| {
+                let doc = &session.doc;
+                if document::find_track_playlist(doc, &params.voice_track_id).is_none() {
+                    return Err(format!("trilha da voz não encontrada: {}", params.voice_track_id));
+                }
+                if document::find_track_playlist(doc, &trilha_alvo).is_none() {
+                    return Err(format!("trilha alvo não encontrada: {trilha_alvo}"));
+                }
+                let voz = document::list_clips_with_position(doc, &params.voice_track_id)
+                    .into_iter()
+                    .map(|(indice, producer_id, in_f, out_f, posicao)| {
+                        let produtor = document::find_producer(doc, &producer_id);
+                        let recurso = produtor.and_then(|p| {
+                            document::get_property(p, "kdenlive-mcp-plus:original_resource")
+                                .or_else(|| document::get_property(p, "resource"))
+                        });
+                        ClipeVoz {
+                            posicao,
+                            quadros: out_f - in_f + 1,
+                            inicio_midia: in_f,
+                            recurso,
+                            velocidade: document::clip_speed(doc, &params.voice_track_id, indice),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                Ok((voz, document::profile_fps(doc)))
+            })
+            .await;
+        let (clipes_voz, fps) = match leitura {
+            Ok(Ok(v)) => v,
+            Ok(Err(mensagem)) => return erro(mensagem),
+            Err(valor_erro) => return valor_erro,
+        };
+        if clipes_voz.is_empty() {
+            return erro(format!("a trilha da voz ({}) não tem nenhum clipe", params.voice_track_id));
+        }
+
+        // 2) trechos de fala, em quadros da timeline (fora do lock: ffmpeg é um subprocesso)
+        let mut falas: Vec<(i64, i64)> = Vec::new();
+        for clipe in &clipes_voz {
+            if !params.detect_speech {
+                falas.push((clipe.posicao, clipe.posicao + clipe.quadros));
+                continue;
+            }
+            if (clipe.velocidade - 1.0).abs() > f64::EPSILON {
+                return erro("detect_speech não funciona em clipes da voz com velocidade alterada; use detect_speech=false");
+            }
+            let Some(recurso) = &clipe.recurso else {
+                return erro("um clipe da voz não tem arquivo de mídia para analisar; use detect_speech=false");
+            };
+            let detectadas = match probe_speech_intervals(
+                std::path::Path::new(recurso),
+                clipe.inicio_midia as f64 / fps,
+                clipe.quadros as f64 / fps,
+                params.silence_threshold_db,
+                params.min_silence_seconds,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return erro(e),
+            };
+            for (ini, fim) in detectadas {
+                falas.push((
+                    clipe.posicao + (ini * fps).round() as i64,
+                    clipe.posicao + (fim * fps).round() as i64,
+                ));
+            }
+        }
+        let trechos = duck::unir_trechos(falas, &ducking);
+
+        // 3) aplica keyframes em cada clipe alvo
+        let descricao = format!("ducking de áudio na trilha {trilha_alvo}");
+        let resultado = self
+            .with_session_mut(|session| {
+                session.snapshot_before(descricao);
+                let alvos: Vec<(usize, i64, i64)> = document::list_clips_with_position(&session.doc, &trilha_alvo)
+                    .into_iter()
+                    .filter(|(indice, ..)| alvo_clip.as_ref().is_none_or(|(_, i)| i == indice))
+                    .map(|(indice, _, in_f, out_f, posicao)| (indice, posicao, out_f - in_f + 1))
+                    .collect();
+                if alvos.is_empty() {
+                    return Err(crate::model::ModelError::NotFound(match &alvo_clip {
+                        Some((t, i)) => format!("clipe não encontrado: {t}:{i}"),
+                        None => format!("a trilha alvo ({trilha_alvo}) não tem nenhum clipe"),
+                    }));
+                }
+                let mut aplicados = Vec::new();
+                for (indice, posicao, quadros) in alvos {
+                    let kfs = duck::keyframes(posicao, quadros, &trechos, &ducking);
+                    let filter_id = document::set_ducking(&mut session.doc, &trilha_alvo, indice, &kfs)?;
+                    aplicados.push(json!({
+                        "clip_ref": format!("{trilha_alvo}:{indice}"),
+                        "filter_id": filter_id,
+                        "keyframes": kfs.iter().map(|(f, db)| json!([f, db])).collect::<Vec<_>>(),
+                        "ducked": !kfs.is_empty(),
+                    }));
+                }
+                session.mark_modified();
+                Ok(aplicados)
+            })
+            .await;
+        match resultado {
+            Ok(alvos) => json!({
+                "ok": true,
+                "voice_track_id": params.voice_track_id,
+                "duck_db": ducking.duck_db,
+                "attack_frames": ducking.attack,
+                "release_frames": ducking.release,
+                "detect_speech": params.detect_speech,
+                "speech_intervals_frames": trechos.iter().map(|(a, b)| json!([a, b])).collect::<Vec<_>>(),
+                "targets": alvos,
             }),
             Err(valor_erro) => valor_erro,
         }

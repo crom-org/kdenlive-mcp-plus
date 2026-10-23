@@ -16,7 +16,7 @@ Se você está chegando agora, leia nesta ordem:
 |---|---|
 | Fase 0 — base, motor e servidor mínimo | Concluída |
 | Fase 1 — base operacional | Concluída |
-| Fase 2 — edição completa | Concluída (exceto `audio_duck`, ver docs/04-ferramentas.md) |
+| Fase 2 — edição completa | Concluída (inclusive `clip_reframe_vertical` e `audio_duck`) |
 | Fase 3 — integração com o Kdenlive aberto | Concluída para o uso principal (formato nativo + autosave + recarregamento automático pelo D-Bus, D-040/D-042); só painéis próprios dentro do Kdenlive (fork) ficam pendentes do responsável pelo projeto |
 
 Ver [05-roadmap.md](05-roadmap.md) para os critérios de saída de cada fase.

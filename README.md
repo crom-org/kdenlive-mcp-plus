@@ -1,6 +1,6 @@
 # kdenlive-mcp-plus
 
-Servidor MCP em Rust que edita vídeo de forma headless usando o libmlt — o mesmo motor de render do Kdenlive —, lendo e escrevendo o formato nativo `.kdenlive` (XML do MLT). O servidor expõe 89 ferramentas MCP — praticamente todo o catálogo de edição (projeto, bin, timeline, filtros, transições, títulos, legendas, áudio, fila de render e mais), descritas por completo em [docs/04-ferramentas.md](docs/04-ferramentas.md). Duas ferramentas do catálogo original (`clip_reframe_vertical`, `audio_duck`) ficaram fora desta execução, por motivos documentados ali.
+Servidor MCP em Rust que edita vídeo de forma headless usando o libmlt — o mesmo motor de render do Kdenlive —, lendo e escrevendo o formato nativo `.kdenlive` (XML do MLT). O servidor expõe 91 ferramentas MCP — todo o catálogo de edição (projeto, bin, timeline, filtros, transições, títulos, legendas, áudio com ducking, reenquadramento vertical, fila de render e mais), descritas por completo em [docs/04-ferramentas.md](docs/04-ferramentas.md) e todas testadas.
 
 > **kdenlive-mcp-plus** é um nome provisório, e a licença do projeto ainda está pendente de decisão. Ver [docs/decisoes.md](docs/decisoes.md) (D-008 e D-009).
 
@@ -33,7 +33,7 @@ cargo run -- render <projeto.xml> <saida.mp4> --preset h264_hq --overwrite
 cargo run -- mcp
 ```
 
-Fala MCP via stdio (entrada/saída padrão) e expõe as 89 ferramentas descritas em [docs/04-ferramentas.md](docs/04-ferramentas.md) (projeto, bin, timeline, filtros, transições, títulos, legendas, áudio, fila de render, etc. — chame `server_info` primeiro para confirmar a versão do libmlt e a lista de presets de render).
+Fala MCP via stdio (entrada/saída padrão) e expõe as 91 ferramentas descritas em [docs/04-ferramentas.md](docs/04-ferramentas.md) (projeto, bin, timeline, filtros, transições, títulos, legendas, áudio, fila de render, etc. — chame `server_info` primeiro para confirmar a versão do libmlt e a lista de presets de render).
 
 ## Configuração no Claude Desktop
 

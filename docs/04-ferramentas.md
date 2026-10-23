@@ -4,7 +4,7 @@ Ver também: [visão](01-visao.md) · [arquitetura](02-arquitetura.md) · [roadm
 
 Regra do projeto (princípio 3 em [docs/01-visao.md](01-visao.md)): uma ferramenta só aparece no `tools/list` do servidor MCP quando está **implementada e testada** (status `testada` nesta tabela). Toda ferramenta `planejada` existe só nesta documentação.
 
-**Estado atual: Fase 2 completa.** 89 ferramentas no `tools/list`, todas `testada`, cobertas por 58 testes automatizados (39 unitários + 19 de integração via protocolo MCP real). Só duas ferramentas do catálogo original continuam `planejada`, por decisão explícita (não por falta de tempo) — ver a nota de cada uma, abaixo, e a decisão D-032 em [decisões](decisoes.md).
+**Estado atual: catálogo completo.** 91 ferramentas no `tools/list`, todas `testada`, cobertas por 91 testes automatizados (65 unitários, 19 de integração via protocolo MCP real, 3 de presets e 4 de render). As duas que tinham ficado `planejada` (`clip_reframe_vertical` e `audio_duck`) foram implementadas e verificadas medindo o resultado (D-045 e D-047 em [decisões](decisoes.md)).
 
 ## Ferramentas desta execução, fora dos catálogos herdado/novo (Fase 0)
 
@@ -170,7 +170,7 @@ Vindas da seção 6.2 do briefing original. Nota de proveniência mantida do lev
 | `subtitle_export_srt` | Legendas | Exporta os clipes de título (texto) de uma trilha como um arquivo `.srt`. | 2 | testada |
 | `audio_set_levels` | Áudio | Define o nível em dB de um clipe, via o filtro `volume`/`level` padrão do libmlt (confirmado via `melt -query`). | 2 | testada |
 | `audio_normalize` | Áudio | Normaliza o loudness de um clipe para uma amplitude alvo, via `volume`/`normalize`. | 2 | testada |
-| `audio_duck` | Áudio | Reduz o volume de uma trilha enquanto há fala (ducking). **Continua planejada, por decisão explícita**: depende de plugins LADSPA, confirmadamente indisponíveis neste ambiente (o próprio libmlt avisa "No LADSPA plugins were found" sempre que roda). Ver decisão D-034. | 3 (avaliar) | planejada |
+| `audio_duck` | Áudio | Abaixa um clipe (ou todos os de uma trilha), em geral a música, enquanto outra trilha, em geral a voz, fala. Usa keyframes no `level` de um filtro `volume` próprio (sem plugins LADSPA; reaplicar troca só esse filtro). A fala é o que há de clipe na trilha da voz, ou, com `detect_speech`, só as partes não silenciosas dele (medidas com o `ffmpeg silencedetect`). Parâmetros: `duck_db`, `attack_frames`, `release_frames`. Verificada **medindo o áudio renderizado** (D-047). | 3 | testada |
 | `clip_set_transform` | Transformação | Define posição, escala e rotação de um clipe, via o filtro `qtblend` padrão do libmlt (`rect`+`rotation`). Repassa os valores exatos do agente, sem calcular nenhuma geometria por conta própria. | 2 | testada |
 | `clip_reframe_vertical` | Transformação | Reenquadra um clipe de vídeo/imagem para o quadro do projeto, que precisa ser vertical (`fill`: preenche e corta, sem faixas; `fit`: cabe inteiro). Mede o arquivo com o `ffprobe` (proporção de pixel e rotação incluídas), calcula o retângulo e o aplica pelo filtro `qtblend` (o "Transform" do Kdenlive), o mesmo de `clip_set_transform`. `focus_x`/`focus_y` (0 a 1) escolhem qual parte do vídeo fica visível no corte. Verificada **nos pixels do quadro renderizado** (D-045). | 2 | testada |
 | `preview_frame` | Pré-visualização | Exporta um PNG de um quadro específico do projeto (da sessão ou de um caminho explícito), em processo isolado. | 1 | testada |

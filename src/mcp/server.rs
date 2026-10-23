@@ -1054,6 +1054,25 @@ impl KdenliveMcpServer {
     // -- Transformação (Fase 2) --------------------------------------------------
 
     #[tool(
+        description = "Audio ducking: lower a clip (or every clip of a track), typically background \
+         music, while another track (typically the voice-over) is speaking. Works with keyframes on \
+         the level of a dedicated libmlt \"volume\" filter (no audio plugins needed); calling it \
+         again replaces its own filter and leaves other volume filters alone. Parameters: \
+         clip_ref OR track_id (the target to lower, exactly one); voice_track_id (required: the \
+         track whose clips define the speech); duck_db (optional, default 12: how many dB to \
+         lower); attack_frames (optional, default 10: ramp down before the speech starts) and \
+         release_frames (optional, default 25: ramp up after it ends), both at least 1; \
+         detect_speech (optional, default false: when false every clip of the voice track counts \
+         as speech; when true only the non-silent parts of those clips do, measured with ffmpeg), \
+         silence_threshold_db (optional, default -35) and min_silence_seconds (optional, default \
+         0.5) tune that detection. Returns the speech intervals (timeline frames) and, per target \
+         clip, the filter id and the keyframes (clip-local frame, dB)."
+    )]
+    pub async fn audio_duck(&self, Parameters(params): Parameters<AudioDuckParams>) -> Json<Value> {
+        Json(self.audio_duck_impl(params).await)
+    }
+
+    #[tool(
         description = "Reframe a timeline video or image clip to the project frame, which must be \
          vertical (e.g. 16:9 footage in a 9:16 project: set the profile first with \
          project_set_profile \"vertical_hd_30\"). The tool measures the source file with ffprobe, \

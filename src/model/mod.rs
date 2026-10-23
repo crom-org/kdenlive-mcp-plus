@@ -8,6 +8,7 @@
 //! MCP nunca é derrubado por uma falha de edição.
 
 pub mod document;
+pub mod duck;
 pub mod profile;
 pub mod reframe;
 pub mod session;

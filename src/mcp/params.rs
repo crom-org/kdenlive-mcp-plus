@@ -517,6 +517,57 @@ fn meio() -> f64 {
     0.5
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AudioDuckParams {
+    /// Clipe a abaixar (a música), `"<track_id>:<índice>"`. Informe este **ou** `track_id`.
+    pub clip_ref: Option<String>,
+    /// Trilha a abaixar (todos os clipes dela). Informe este **ou** `clip_ref`.
+    pub track_id: Option<String>,
+    /// Trilha da voz: enquanto ela tem som, o alvo fica abaixado.
+    pub voice_track_id: String,
+    /// Quanto abaixar, em dB (positivo). Padrão: 12.
+    #[serde(default = "duck_db_padrao")]
+    pub duck_db: f64,
+    /// Quadros da descida antes da fala começar. Padrão: 10. Mínimo: 1.
+    #[serde(default = "attack_padrao")]
+    pub attack_frames: i64,
+    /// Quadros da subida depois da fala acabar. Padrão: 25. Mínimo: 1.
+    #[serde(default = "release_padrao")]
+    pub release_frames: i64,
+    /// Se `true`, só conta como fala o que está acima do limiar dentro dos
+    /// clipes da voz (pausas entre as frases soltam o volume); se `false`
+    /// (padrão), qualquer parte com clipe na trilha da voz abaixa o alvo.
+    #[serde(default)]
+    pub detect_speech: bool,
+    /// Com `detect_speech`: nível, em dB, abaixo do qual é silêncio. Padrão: -35.
+    #[serde(default = "limiar_padrao")]
+    pub silence_threshold_db: f64,
+    /// Com `detect_speech`: duração mínima, em segundos, de uma pausa para
+    /// ela soltar o volume. Padrão: 0.5.
+    #[serde(default = "pausa_padrao")]
+    pub min_silence_seconds: f64,
+}
+
+fn duck_db_padrao() -> f64 {
+    12.0
+}
+
+fn attack_padrao() -> i64 {
+    10
+}
+
+fn release_padrao() -> i64 {
+    25
+}
+
+fn limiar_padrao() -> f64 {
+    -35.0
+}
+
+fn pausa_padrao() -> f64 {
+    0.5
+}
+
 // -- Miniatura --------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
