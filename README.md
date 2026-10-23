@@ -274,7 +274,7 @@ Cuidados:
 | `KDENLIVE_MCP_AUTOSAVE=1` | Só regrava o projeto a cada edição (o Kdenlive só atualiza com File ▸ Revert). |
 | `KDENLIVE_MCP_RENDER_TIMEOUT_SECS` | Tempo limite de um render, em segundos (padrão 1800; aumente para vídeos longos). |
 | `KDENLIVE_MCP_BUSCTL` | Caminho do `busctl`, se estiver fora do `PATH` (ou um programa de teste). |
-| `KDENLIVE_MCP_KDENLIVE` | Programa que `kdenlive_open` executa (padrão: `kdenlive` no `PATH`, senão o `kdenlive*.AppImage` mais novo em `~/Applications`). |
+| `KDENLIVE_MCP_KDENLIVE` | Programa que `kdenlive_open` executa (padrão: o `kdenlive*.AppImage` mais novo em `~/Applications`, senão `kdenlive` no `PATH`). |
 
 Sem nenhuma das duas primeiras, peça `kdenlive_live` (liga na hora), `kdenlive_reload` (recarrega uma vez) ou `project_save` depois de cada etapa. Edições feitas pela interface do Kdenlive só chegam ao Claude se ele reabrir o arquivo (`project_open`).
 

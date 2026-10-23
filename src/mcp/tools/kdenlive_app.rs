@@ -12,20 +12,22 @@ use crate::mcp::live::{self, Resultado};
 use crate::mcp::params::{KdenliveLiveParams, KdenliveOpenParams};
 use crate::mcp::server::{KdenliveMcpServer, erro};
 
-/// Programa do Kdenlive: `KDENLIVE_MCP_KDENLIVE`, senão `kdenlive` no `PATH`,
-/// senão o AppImage mais recente em `~/Applications` (`kdenlive*.AppImage`).
+/// Programa do Kdenlive: `KDENLIVE_MCP_KDENLIVE`, senão o AppImage mais recente em
+/// `~/Applications` (`kdenlive*.AppImage`), senão `kdenlive` no `PATH`. O AppImage vem antes do
+/// `PATH` porque quem o instala em `~/Applications` costuma querer uma versão mais nova que a da
+/// distribuição (visto ao vivo: o `kdenlive` do `PATH` era o 23.08 e o AppImage, o 26.04).
 fn programa_kdenlive() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("KDENLIVE_MCP_KDENLIVE") {
         return Some(PathBuf::from(p));
     }
-    if let Some(caminhos) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&caminhos) {
-            let candidato = dir.join("kdenlive");
-            if candidato.is_file() {
-                return Some(candidato);
-            }
-        }
+    if let Some(appimage) = appimage_mais_recente() {
+        return Some(appimage);
     }
+    let caminhos = std::env::var_os("PATH")?;
+    std::env::split_paths(&caminhos).map(|dir| dir.join("kdenlive")).find(|c| c.is_file())
+}
+
+fn appimage_mais_recente() -> Option<PathBuf> {
     let apps = PathBuf::from(std::env::var_os("HOME")?).join("Applications");
     let mut appimages: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(apps)
         .ok()?

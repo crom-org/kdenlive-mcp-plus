@@ -1335,8 +1335,8 @@ impl KdenliveMcpServer {
     #[tool(
         description = "Open the Kdenlive application (a window on the user's screen) with a \
          project, unless a Kdenlive already shows it. Parameter: path (optional, default this \
-         session's saved project). The program is KDENLIVE_MCP_KDENLIVE, else `kdenlive` on the \
-         PATH, else the newest ~/Applications/kdenlive*.AppImage. Returns the process id (or \
+         session's saved project). The program is KDENLIVE_MCP_KDENLIVE, else the newest \
+         ~/Applications/kdenlive*.AppImage, else `kdenlive` on the PATH. Returns the process id (or \
          ja_aberto:true). Combine with kdenlive_live to watch the edits as they happen."
     )]
     pub async fn kdenlive_open(&self, Parameters(params): Parameters<KdenliveOpenParams>) -> Json<Resposta> {
