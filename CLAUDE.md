@@ -26,7 +26,9 @@ cargo run -- --version
 
 ## Antes de commitar
 
-Não comite nem dê push sem o usuário pedir explicitamente — nenhum commit foi feito durante a construção desta base (Fase 0).
+Na construção original (Fase 0) não houve commit. Depois, o responsável pelo projeto pediu que cada marco fosse commitado e publicado em `crom-org/kdenlive-mcp-plus` (branch `master`), e é isso que vem sendo feito. Fora desse pedido, não comite nem dê push sem o usuário pedir.
+
+Rode a suíte com `cargo test -- --test-threads=1` e `cargo clippy --all-targets -- -D warnings` antes de commitar. Os testes de reenquadramento e de ducking usam `ffmpeg`/`ffprobe` (e são ignorados se faltarem).
 
 ## O que não fazer
 
@@ -34,6 +36,8 @@ Não comite nem dê push sem o usuário pedir explicitamente — nenhum commit f
 - Não passe o nome de um preset como valor de uma opção do avformat (ver acima).
 - Não escreva nada no stdout do processo quando ele estiver rodando em modo `mcp` — isso corrompe o transporte do protocolo. Logs vão para stderr.
 - Não adicione `unsafe` fora de `src/engine/`.
+- Não deixe um subprocesso de render (`render`/`frame`) sair pelo caminho normal do Rust: ele termina com `engine::encerrar_sem_limpeza` (`_exit`), porque o `atexit` do libmlt derruba o processo se uma thread de render ainda estiver no módulo Qt (D-046).
+- Não gere um projeto sem nenhuma trilha: o Kdenlive 26 fecha ao abri-lo (D-044).
 - Não assuma que uma função FFI do libmlt teve sucesso sem checar o ponteiro/código de retorno contra nulo/erro.
 - Não invente uma versão, uma licença ou um número que não foi verificado nesta execução — escreva "a verificar" e diga como verificar (ver as pendências em [docs/decisoes.md](docs/decisoes.md)).
 
